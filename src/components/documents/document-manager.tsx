@@ -232,7 +232,7 @@ export function DocumentManager({ initialDocuments }: { initialDocuments: Docume
   const phaseLabel: Record<Exclude<UploadPhase, 'idle'>, string> = {
     uploading: `アップロード中... ${progress}%`,
     registering: '登録中...',
-    processing: 'テキスト抽出・Embedding生成中...',
+    processing: 'テキスト解析・必要ページのOCR・ベクトル化中...',
   };
 
   return (
@@ -257,7 +257,9 @@ export function DocumentManager({ initialDocuments }: { initialDocuments: Docume
             {isBusy ? (
               <div className="mx-auto max-w-sm">
                 <Loader2 className="mx-auto size-8 animate-spin text-brand-600" aria-hidden="true" />
-                <p className="mt-3 text-sm font-medium text-ink">{phaseLabel[phase]}</p>
+                <p className="mt-3 text-sm font-medium text-ink" aria-live="polite">
+                  {phaseLabel[phase]}
+                </p>
 
                 <div
                   className="mt-3 h-2 w-full overflow-hidden rounded-full bg-border-subtle"
@@ -298,6 +300,9 @@ export function DocumentManager({ initialDocuments }: { initialDocuments: Docume
                 <p className="mt-4 text-xs text-ink-subtle">
                   PDF形式 / 最大 {formatBytes(MAX_FILE_SIZE_BYTES)} / 最大 {MAX_PAGE_COUNT} ページ
                 </p>
+                <p className="mt-1 text-xs text-ink-faint">
+                  スキャンPDFや日本語・英語混在PDFも自動解析します
+                </p>
               </>
             )}
 
@@ -337,7 +342,7 @@ export function DocumentManager({ initialDocuments }: { initialDocuments: Docume
           <EmptyState
             icon={FileText}
             title="まだ資料が登録されていません"
-            description="社内マニュアルや規程のPDFをアップロードすると、テキスト抽出・Embedding生成が行われ、根拠付きで検索できるようになります。"
+            description="社内マニュアルや規程のPDFをアップロードすると、テキスト解析と必要ページのOCRが行われ、根拠付きで検索できるようになります。"
             action={
               <Button type="button" onClick={() => fileInputRef.current?.click()}>
                 <UploadCloud className="size-4" aria-hidden="true" />
@@ -370,6 +375,13 @@ export function DocumentManager({ initialDocuments }: { initialDocuments: Docume
 
                       {document.status === 'failed' && document.error_message ? (
                         <p className="break-anywhere mt-2 flex items-start gap-1.5 text-xs text-danger-700">
+                          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+                          {document.error_message}
+                        </p>
+                      ) : null}
+
+                      {document.status === 'ready' && document.error_message ? (
+                        <p className="break-anywhere mt-2 flex items-start gap-1.5 text-xs text-warning-700">
                           <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
                           {document.error_message}
                         </p>

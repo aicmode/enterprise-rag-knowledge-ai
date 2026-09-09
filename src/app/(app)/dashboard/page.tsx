@@ -146,7 +146,7 @@ export default async function DashboardPage() {
             <EmptyState
               icon={FileText}
               title="資料がまだありません"
-              description="PDFを登録すると、テキスト抽出とEmbedding生成が行われ、検索対象になります。"
+              description="PDFを登録すると、テキスト解析と必要ページのOCR・ベクトル化が行われ、検索対象になります。"
               action={
                 <Link href="/documents">
                   <Button type="button" size="sm">

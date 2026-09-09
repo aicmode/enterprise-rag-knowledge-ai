@@ -2,7 +2,7 @@
 
 **社内資料を、根拠付きで検索できるナレッジAI**
 
-社内マニュアル・規程・FAQ などの PDF を登録すると、テキスト抽出 → ページ単位のチャンク分割 → Embedding → pgvector への保存が行われ、自然言語の質問に対して**登録済み資料の該当箇所だけ**を根拠に回答します。
+社内マニュアル・規程・FAQ などの PDF を登録すると、ページ単位のNativeテキスト抽出 → 必要ページのみOCR → チャンク分割 → Embedding → pgvector への保存が行われ、自然言語の質問に対して**登録済み資料の該当箇所だけ**を根拠に回答します。
 
 回答には必ず **資料名・ページ番号・引用テキスト** が添えられ、利用者は AI の回答を原典で検証できます。
 
@@ -54,6 +54,7 @@ RAG は「それらしい回答」を作るだけなら簡単ですが、**業�
 | **回答範囲の限定** | System Prompt でコンテキスト限定を明示し、根拠がなければ「登録されている資料からは確認できませんでした。」を返す |
 | **テナント分離** | RLS に加えて、検索 RPC 内で `d.user_id = auth.uid()` を**明示的に**指定。ポリシー欠落時も他人のチャンクは返らない |
 | **PDF アップロード経路** | ブラウザ → Supabase Storage へ**直接**アップロード。Serverless Function に 10MB のボディを通さない |
+| **スキャン・mixed PDF** | ページごとにNative抽出品質を判定し、usableでないページだけをOCR。テキストページを無条件に画像送信しない |
 | **失敗時の状態整合** | 途中失敗した資料は `ready` にせず、生成済みチャンクを削除してから `failed` に。中途半端な検索対象を残さない |
 
 ---
@@ -74,6 +75,7 @@ RAG は「それらしい回答」を作るだけなら簡単ですが、**業�
 ### 資料管理 `/documents`
 - ドラッグ＆ドロップ / ファイル選択
 - PDF 形式・10MB・100ページの検証
+- 日本語・英語・混在テキストPDFとスキャンPDFの自動判定
 - **実測値によるアップロード進捗表示**（XHR + 署名付きアップロード URL）
 - 解析状態の可視化（待機中 / 解析中 / 利用可能 / 失敗）
 - 失敗時の再試行（既存チャンクを cleanup してから再解析）
@@ -106,10 +108,11 @@ RAG は「それらしい回答」を作るだけなら簡単ですが、**業�
 | ファイル保存 | Supabase Storage (private bucket) |
 | Embedding | OpenAI `text-embedding-3-small` (1536次元) |
 | 回答生成 | OpenAI Chat Completions (`OPENAI_CHAT_MODEL`) |
+| OCR fallback | OpenAI Responses API + Vision (`OPENAI_OCR_MODEL`) |
 | バリデーション | Zod |
 | テスト | Vitest / React Testing Library |
 
-PDF 解析には **`pdfjs-dist`（legacy build）** を使用しています。ページ単位で `getTextContent()` を呼べるため、**ページ番号を正確に保持したまま**テキストを取り出せることが採用理由です。
+PDF 解析には **`pdfjs-dist`（legacy build）** を使用しています。同梱CMapと標準フォントデータをNode側で明示し、ページ単位で `getTextContent()` を実行します。文字数・空白除去後文字数・文字化け率が基準に届かないページだけ `@napi-rs/canvas` でPNG化し、OpenAI Visionへ送るため、**ページ番号を正確に保持したまま**Native/OCRを混在できます。
 
 ---
 
@@ -150,7 +153,7 @@ graph TB
 
     API_PROC --> PIPE
     PIPE -->|"PDF 取得"| ST
-    PIPE -->|"Embedding 生成"| OPENAI
+    PIPE -->|"必要ページのOCR / Embedding 生成"| OPENAI
     PIPE -->|"チャンク保存"| DB
 
     API_ASK --> RAG
@@ -224,13 +227,19 @@ sequenceDiagram
     A->>P: processDocument()
     P->>D: status を processing に（条件付き UPDATE ＝ 排他制御）
     P->>S: PDF を取得
-    P->>P: ページ単位でテキスト抽出（1..N）
-    P->>P: 100ページ以内か検証 / テキスト層の有無を検証
+    P->>P: 100ページ以内か検証
+    loop ページ 1..N（逐次処理）
+        P->>P: Native抽出 + 品質判定
+        opt usableでないページのみ
+            P->>P: 最大2048pxのPNGへレンダリング
+            P->>O: Responses APIでOCR
+        end
+    end
     P->>P: ページを跨がないチャンク分割
     P->>O: Embedding をバッチ生成（64件ずつ）
     P->>D: 既存チャンクを削除 → document_chunks に保存
     P->>D: status を ready に / page_count を記録
-    Note over P,D: いずれかで失敗した場合<br/>チャンクを削除して status を failed に
+    Note over P,D: 一部ページのOCR失敗は利用可能ページを保持<br/>全ページ利用不可または後段失敗は failed
 ```
 
 ### ページ番号が保たれる仕組み
@@ -362,7 +371,7 @@ auth.users ──cascade──> profiles
 | `NEXT_PUBLIC_SUPABASE_URL` | ブラウザ可 | エンドポイント |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | ブラウザ可 | RLS 前提の匿名キー |
 | `SUPABASE_SERVICE_ROLE_KEY` | **サーバーのみ** | RLS を迂回。PDF 取得・チャンク書込・Storage 削除 |
-| `OPENAI_API_KEY` | **サーバーのみ** | Embedding / 回答生成 |
+| `OPENAI_API_KEY` | **サーバーのみ** | OCR / Embedding / 回答生成 |
 
 秘密値を含む `src/lib/config/env.ts` と `src/lib/supabase/admin.ts` は先頭で `import 'server-only'` しています。Client Component から誤って import すると**ビルドが失敗する**ため、リファクタリング時の事故を型・ビルドレベルで防いでいます。
 
@@ -413,7 +422,9 @@ and (select auth.uid())::text = (storage.foldername(name))[1]
 | 10MB 超過 | ファイルサイズは10MB以下にしてください。 | 作成しない |
 | 100ページ超過 | ページ数は100ページ以下のPDFをご利用ください。 | `failed` |
 | 破損 / 暗号化 PDF | このPDFを読み取れませんでした。破損または保護されている可能性があります。 | `failed` |
-| 画像のみのスキャン PDF | このPDFからテキストを抽出できませんでした。画像のみのスキャンPDFは現在サポートしていません。 | `failed` |
+| Native/OCRともに文字なし | このPDFから読み取り可能なテキストを取得できませんでした。 | `failed` |
+| OCR API失敗 / timeout（全ページ） | 画像文字解析の失敗 / timeoutを案内 | `failed` |
+| OCR失敗（一部ページのみ） | 読み取れなかったページ番号を警告 | `ready`（利用可能ページのみ） |
 | Storage 失敗 | ファイルの保存・取得に失敗しました。 | `failed` |
 | Embedding 失敗 | 資料の解析に失敗しました。 | `failed`（チャンクは削除） |
 | 検索失敗 | 資料の検索に失敗しました。 | — |
@@ -472,6 +483,7 @@ npm run dev
 | `SUPABASE_SERVICE_ROLE_KEY` | ✅ | **秘密**。サーバー専用 |
 | `OPENAI_API_KEY` | ✅ | **秘密**。サーバー専用 |
 | `OPENAI_CHAT_MODEL` | 任意 | 既定 `gpt-4o-mini` |
+| `OPENAI_OCR_MODEL` | 任意 | OCR専用。既定 `gpt-5-mini` |
 | `RAG_TOP_K` | 任意 | 既定 `5`（1〜20 にクランプ） |
 | `RAG_SIMILARITY_THRESHOLD` | 任意 | 既定 `0.3`（0〜1 にクランプ） |
 | `RAG_CHUNK_SIZE` | 任意 | 既定 `1000`（200〜4000 にクランプ） |
@@ -502,6 +514,21 @@ SQL Editor で以下の順に実行します。
 2. `0002_row_level_security.sql` — RLS 有効化とポリシー
 3. `0003_match_document_chunks.sql` — ベクトル検索 RPC
 4. `0004_storage.sql` — `documents` バケットと Storage ポリシー
+5. `0005_rpc_grant_hardening.sql` — 検索 RPC の EXECUTE 権限を `authenticated` のみに限定
+
+> `0005` の補足: Supabase は `public` スキーマに作成された関数へ、`ALTER DEFAULT PRIVILEGES` により `anon` を含む EXECUTE 権限を自動付与します。これは `anon` ロールへの明示的な付与であるため、`0003` の `revoke ... from public` では取り消されません。RPC は SECURITY INVOKER かつ `d.user_id = auth.uid()` で絞り込むため匿名呼び出しでも 0 件しか返りませんが、意図どおり「未認証では実行そのものができない」状態にするための追加マイグレーションです。
+
+### 1-b. ローカル Supabase での検証（任意）
+
+本番プロジェクトを使わずに、マイグレーション・RLS・Storage ポリシー・ベクトル検索を一通り検証できます（Docker が必要）。
+
+```bash
+supabase start          # 初回はイメージ取得のため数分かかります
+supabase db reset       # 0001〜0005 をゼロから順に再適用
+supabase status         # API URL と各キーを表示
+```
+
+`supabase/config.toml` はこのローカル環境の定義です。ここで発行されるキーはローカル専用の既定値で、本番の秘密情報とは無関係です。
 
 ### 2. Storage
 
@@ -517,7 +544,7 @@ Authentication → Providers で **Email** を有効化します。
 ### 4. 動作確認
 
 1. `/register` でアカウント作成
-2. `/documents` でテキスト層のある PDF をアップロード
+2. `/documents` でテキストPDFまたはスキャンPDFをアップロード
 3. ステータスが `解析中` → `利用可能` に変わることを確認
 4. `/ask` で資料の内容について質問し、出典のページ番号が実際の PDF と一致することを確認
 
@@ -531,11 +558,13 @@ Authentication → Providers で **Email** を有効化します。
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
    - `SUPABASE_SERVICE_ROLE_KEY`
    - `OPENAI_API_KEY`
-   - 必要に応じて `OPENAI_CHAT_MODEL` / `RAG_*`
+   - 必要に応じて `OPENAI_CHAT_MODEL` / `OPENAI_OCR_MODEL` / `RAG_*`
 3. Supabase の Auth Redirect URLs に本番ドメインの `/auth/callback` を追加
 4. Deploy
 
 **関数の実行時間について**: `/api/documents/process` は `maxDuration = 300` を宣言しています。Hobby プランでは上限が短いため、大きな PDF がタイムアウトする場合があります（[既知の制限](#既知の制限)参照）。
+
+本番ビルドは `next build --webpack` に固定しています。PDF.jsが実行時に読むCMap・標準フォント資材と、`@napi-rs/canvas` のプラットフォーム別バイナリをVercelのServerless Functionへ確実にトレースするためです。
 
 ---
 
@@ -545,11 +574,29 @@ Authentication → Providers で **Email** を有効化します。
 npm run test
 ```
 
-`156 tests / 11 files`（2026-09-08 時点）。ロジックを純粋関数に分離しているため、外部サービスなしで中核を検証できます。
+`183 tests / 14 files`（2026-09-09 時点。外部連携2ファイルは既定でskip）。ロジックを純粋関数に分離しているため、外部サービスなしで中核を検証できます。
+
+これに加えて、実際の Supabase インスタンスに接続する統合テスト（38件）と、実OpenAI APIで日本語OCR・回答・cross-language embeddingを確認するテスト（2件）があります。既定ではスキップされ、明示的に接続情報や実行フラグを渡したときだけ実行されます。
+
+```bash
+supabase start
+supabase status                     # 表示された値を下の 3 変数に設定
+export SUPABASE_INTEGRATION_URL=<API URL>
+export SUPABASE_INTEGRATION_ANON_KEY=<anon key>
+export SUPABASE_INTEGRATION_SERVICE_ROLE_KEY=<service_role key>
+npm run test                        # 221 tests pass / OpenAI 2 tests skip
+```
+
+`OPENAI_API_KEY` は不要です。統合テストは決定的なローカル Embedding 関数を使うため、OpenAI へ接続せずに pgvector 検索・出典ページ番号・テナント分離まで検証できます（LLM の生成文だけが対象外）。
+
+実OpenAI APIを使う検証は、API利用料金が発生するため明示的に有効化します。
+
+```bash
+RUN_OPENAI_INTEGRATION=1 node --env-file=.env.local node_modules/vitest/vitest.mjs run tests/integration/openai.integration.test.ts
+```
 
 | ファイル | 検証内容 |
 |---|---|
-| `pdf-extraction.test.ts` | **実際の PDF を生成して抽出**。ページ番号 1..N の一致、ページ間のテキスト混入が無いこと、破損/テキスト無し/ページ超過の失敗分類 |
 | `chunking.test.ts` | ページを跨がないこと、オーバーラップ、境界選択、**無限ループしないこと**（区切り無し・過大 overlap） |
 | `citations.test.ts` | 出典の構築、同一ページの重複排除、類似度順、抜粋の切り詰め |
 | `document-validation.test.ts` | MIME/拡張子/サイズ、ファイル名サニタイズ、**パストラバーサル防止**、Storage パス構築 |
@@ -558,14 +605,19 @@ npm run test
 | `rag-config.test.ts` | 環境変数のパースとクランプ、`EMBEDDING_DIMENSIONS` と `vector(1536)` の整合 |
 | `errors.test.ts` | **内部エラー詳細がレスポンスに漏れないこと**、HTTP ステータス対応 |
 | `citation-card.test.tsx` | 出典カードの描画（資料名・P.n・引用文・一致度） |
+| `server-env.test.ts` | Supabase 設定と OpenAI 設定が独立に検証されること、エラーが変数名のみを出し値を漏らさないこと |
+| `integration/supabase.integration.test.ts` | **実 DB 接続**。マイグレーション適用結果、`vector(1536)`、PostgREST 経由の `match_document_chunks`、RLS のテナント分離、Storage ポリシー、Feedback UPSERT、再処理の冪等性、削除の整合性 |
 | `pdf-text.test.ts` | テキスト結合（日本語に不要な空白を入れない）、正規化 |
+| `pdf-extraction.test.ts` | 日本語ToUnicode Native抽出、scan OCR、native/scan/native mixed PDF、ページ番号、破損・保護PDF、OCR失敗・timeout・部分成功 |
+| `ocr.test.ts` | Responses API画像入力、OCR専用モデル、high detail、非保存設定 |
+| `integration/openai.integration.test.ts` | **実API（opt-in）**。日本語scan OCR→日本語回答→Citation、英語資料への日本語質問のEmbedding類似度 |
 | `format.test.ts` | バイト数・日時（タイムゾーン固定）・時間・切り詰め |
 
 ---
 
 ## 既知の制限
 
-- **OCR 未対応** — 画像のみのスキャン PDF はテキストを抽出できないため、明示的に `failed` とします。対応には OCR（Tesseract / Cloud Vision 等）の追加が必要です。
+- **OCR精度は原稿品質に依存** — 低解像度、手書き、極端な傾き、複雑な表では文字を取得できない場合があります。一部ページだけ失敗した場合はページ番号付き警告を残し、取得できたページは検索対象にします。
 - **PDF のみ対応** — Word・Excel・PowerPoint・HTML は未対応です。
 - **同期的な取り込み処理** — `/api/documents/process` がリクエスト内で抽出・Embedding まで完了させます。100ページ / 10MB という上限内では現実的ですが、大規模運用ではジョブキュー（Supabase Queues、Inngest 等）による非同期化が必要です。Vercel Hobby プランでは関数の実行時間上限により、大きな PDF がタイムアウトする可能性があります。
 - **ベクトル検索のフィルタ方式** — 所有者による絞り込みを `documents` との JOIN で行っています。数万チャンク規模までは問題ありませんが、大規模化する場合は `document_chunks` に `user_id` を非正規化し、パーティションまたは複合インデックスで絞り込む設計が有効です。
@@ -573,13 +625,13 @@ npm run test
 - **回答のストリーミング未対応** — 回答は生成完了後に一括表示されます。
 - **単一ユーザー単位のテナント分離** — 分離の単位は「ユーザー」です。組織で資料を共有する運用には、組織テーブルとメンバーシップに基づく RLS への拡張が必要です。
 - **アプリ側のレート制限なし** — OpenAI 側のレート制限に依存しています。
-- **`standardFontDataUrl` 未設定** — pdf.js が標準フォントデータの URL に関する警告をログに出す場合があります。テキスト抽出には影響しません。
+- **Native抽出不能なフォント構造** — 同梱CMapとToUnicodeを利用しても文字対応を復元できない独自エンコーディングは、ページ単位OCRへフォールバックします。
 
 ---
 
 ## 今後の拡張
 
-- OCR による画像 PDF 対応
+- OCR結果のレイアウト・表構造を保持するStructured Output
 - ジョブキューによる取り込みの非同期化と進捗のリアルタイム表示
 - ハイブリッド検索（全文検索 + ベクトル検索）と Cross-Encoder リランキング
 - 回答のストリーミング表示

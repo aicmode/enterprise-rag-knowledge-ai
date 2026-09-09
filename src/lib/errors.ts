@@ -21,6 +21,8 @@ export type AppErrorCode =
   | 'too_many_pages'
   | 'pdf_unreadable'
   | 'pdf_no_text'
+  | 'ocr_failed'
+  | 'ocr_timeout'
   | 'storage_failed'
   | 'database_failed'
   | 'embedding_failed'
@@ -39,7 +41,9 @@ const USER_MESSAGES: Record<AppErrorCode, string> = {
   file_too_large: 'ファイルサイズは10MB以下にしてください。',
   too_many_pages: 'ページ数は100ページ以下のPDFをご利用ください。',
   pdf_unreadable: 'このPDFを読み取れませんでした。破損または保護されている可能性があります。',
-  pdf_no_text: 'このPDFからテキストを抽出できませんでした。画像のみのスキャンPDFは現在サポートしていません。',
+  pdf_no_text: 'このPDFから読み取り可能なテキストを取得できませんでした。画像が不鮮明な場合は、より高品質なPDFでお試しください。',
+  ocr_failed: 'PDFの画像文字解析に失敗しました。時間をおいて再度お試しください。',
+  ocr_timeout: 'PDFの画像文字解析がタイムアウトしました。ページ数を減らして再度お試しください。',
   storage_failed: 'ファイルの保存・取得に失敗しました。もう一度お試しください。',
   database_failed: 'データの保存に失敗しました。もう一度お試しください。',
   embedding_failed: '資料の解析に失敗しました。もう一度お試しください。',
@@ -60,6 +64,8 @@ const STATUS_BY_CODE: Record<AppErrorCode, number> = {
   too_many_pages: 400,
   pdf_unreadable: 422,
   pdf_no_text: 422,
+  ocr_failed: 502,
+  ocr_timeout: 504,
   storage_failed: 502,
   database_failed: 500,
   embedding_failed: 502,

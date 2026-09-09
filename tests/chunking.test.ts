@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import { chunkPageText, chunkPages, findBreakPoint } from '@/lib/rag/chunking';
-import type { PdfPage } from '@/lib/rag/pdf';
+import type { PdfPageText } from '@/lib/rag/pdf';
 
 const CONFIG = { chunkSize: 200, chunkOverlap: 40 };
 
-function makePage(pageNumber: number, text: string): PdfPage {
+function makePage(pageNumber: number, text: string): PdfPageText {
   return { pageNumber, text };
 }
 

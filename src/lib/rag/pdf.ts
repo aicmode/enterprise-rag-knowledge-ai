@@ -1,48 +1,63 @@
 import 'server-only';
 
-import { MAX_PAGE_COUNT, MIN_PAGE_TEXT_LENGTH } from '@/lib/config/rag';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import type { PDFPageProxy } from 'pdfjs-dist/types/src/display/api';
+
+import {
+  MAX_GARBLED_TEXT_RATIO,
+  MAX_PAGE_COUNT,
+  MIN_PAGE_TEXT_LENGTH,
+  OCR_MAX_IMAGE_DIMENSION,
+  OCR_RENDER_SCALE,
+} from '@/lib/config/rag';
 import { AppError } from '@/lib/errors';
+import type { OcrPage } from './ocr';
 
-/**
- * PDF text extraction, page by page.
- *
- * The single most important property of this module: text never leaves the
- * page it came from. We deliberately do NOT concatenate the whole document into
- * one string before chunking, because doing so destroys the page boundary and
- * makes it impossible to say *which page* a citation came from. Page numbers
- * are the difference between "the AI says so" and "the AI says so, see 就業規則
- * P.12".
- *
- * Page numbers here are 1-based and are exactly what pdf.js reports, so
- * `pageNumber === 12` means the twelfth page of the PDF.
- */
+export type PdfPageSource = 'native' | 'ocr' | 'unavailable';
 
-export interface PdfPage {
-  /** 1-based page number as reported by the PDF itself. */
+export interface PageTextQuality {
+  characterCount: number;
+  nonWhitespaceCharacterCount: number;
+  garbledRatio: number;
+  usable: boolean;
+}
+
+export interface PdfPageText {
+  /** Original 1-based PDF page number. */
   pageNumber: number;
-  /** Normalised text content of that page. */
   text: string;
+}
+
+export interface PdfPage extends PdfPageText {
+  /** Whether final text came from native extraction, OCR, or remained unavailable. */
+  source: PdfPageSource;
+  /** Metrics from stage 1, retained even when OCR supplies the final text. */
+  nativeQuality: PageTextQuality;
+  /** Metrics for the final selected text. */
+  quality: PageTextQuality;
+}
+
+export interface PdfExtractionWarning {
+  pageNumber: number;
+  code: 'ocr_failed' | 'ocr_timeout' | 'ocr_no_text';
 }
 
 export interface PdfExtractionResult {
   pageCount: number;
   pages: PdfPage[];
-  /** Total characters of usable text across all pages. */
   totalCharacters: number;
+  nativePageCount: number;
+  ocrPageCount: number;
+  skippedPageNumbers: number[];
+  warnings: PdfExtractionWarning[];
 }
 
-/**
- * pdf.js emits text as a stream of positioned items. Naively joining them
- * produces run-together words ("annualpaidleave"), so we rebuild spacing from
- * the layout hints pdf.js provides:
- *
- *  - `hasEOL` marks the end of a visual line -> newline
- *  - a `str` that does not already end in whitespace gets a space appended,
- *    unless the next item starts with whitespace
- *
- * Japanese text has no inter-word spaces, so we only insert a space when the
- * adjacent characters are not CJK -- otherwise every glyph run would be split.
- */
+export interface ExtractPdfOptions {
+  /** Override only for deterministic tests or another server-side provider. */
+  ocrPage?: OcrPage;
+}
+
 const CJK_RE = /[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uff00-\uffef]/;
 
 interface TextItemLike {
@@ -50,6 +65,7 @@ interface TextItemLike {
   hasEOL?: boolean;
 }
 
+/** Join positioned PDF.js text runs without injecting spaces between CJK glyphs. */
 export function joinTextItems(items: readonly TextItemLike[]): string {
   let out = '';
 
@@ -61,10 +77,9 @@ export function joinTextItems(items: readonly TextItemLike[]): string {
       const nextChar = str[0];
       const needsSpace =
         prevChar !== undefined &&
-        !/\s/.test(prevChar) &&
+        !/\s/u.test(prevChar) &&
         nextChar !== undefined &&
-        !/\s/.test(nextChar) &&
-        // Do not inject spaces between CJK glyph runs.
+        !/\s/u.test(nextChar) &&
         !CJK_RE.test(prevChar) &&
         !CJK_RE.test(nextChar);
 
@@ -78,11 +93,11 @@ export function joinTextItems(items: readonly TextItemLike[]): string {
   return out;
 }
 
-/** Collapse the whitespace noise typical of PDF extraction. */
+/** Normalize extraction noise without changing full-width or Japanese semantics. */
 export function normalizePageText(raw: string): string {
   return raw
+    .normalize('NFC')
     .replace(/\r\n?/g, '\n')
-    // Soft hyphen and zero-width characters carry no meaning for retrieval.
     .replace(/[\u00ad\u200b-\u200d\ufeff]/g, '')
     .replace(/[ \t　]+/g, ' ')
     .replace(/ ?\n ?/g, '\n')
@@ -90,32 +105,93 @@ export function normalizePageText(raw: string): string {
     .trim();
 }
 
-/**
- * Extract every page of a PDF.
- *
- * Throws `AppError` with a user-safe code for the three failure modes that
- * matter operationally:
- *  - `pdf_unreadable` : corrupt, encrypted, or not actually a PDF
- *  - `too_many_pages` : beyond the ingestion budget
- *  - `pdf_no_text`    : parsed fine but has no text layer (i.e. a scan)
- */
-export async function extractPdfPages(data: Uint8Array): Promise<PdfExtractionResult> {
-  // The legacy build is the one that runs under Node without a DOM. Imported
-  // lazily so the (large) parser is only loaded on the processing path.
-  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+function isSuspiciousCharacter(char: string): boolean {
+  const codePoint = char.codePointAt(0);
+  if (codePoint === undefined) return true;
 
+  return (
+    char === '\ufffd' ||
+    char === '\u25a1' ||
+    (codePoint >= 0 && codePoint <= 8) ||
+    (codePoint >= 11 && codePoint <= 31) ||
+    (codePoint >= 0x7f && codePoint <= 0x9f) ||
+    (codePoint >= 0xe000 && codePoint <= 0xf8ff) ||
+    (codePoint >= 0xf0000 && codePoint <= 0xffffd) ||
+    (codePoint >= 0x100000 && codePoint <= 0x10fffd)
+  );
+}
+
+/** Evaluate one page independently; a document-wide length check is insufficient. */
+export function evaluatePageText(rawText: string): { text: string; quality: PageTextQuality } {
+  const text = normalizePageText(rawText);
+  const characters = Array.from(text);
+  const nonWhitespace = characters.filter((char) => !/\s/u.test(char));
+  const suspiciousCount = nonWhitespace.filter(isSuspiciousCharacter).length;
+  const garbledRatio = nonWhitespace.length === 0 ? 0 : suspiciousCount / nonWhitespace.length;
+
+  return {
+    text,
+    quality: {
+      characterCount: characters.length,
+      nonWhitespaceCharacterCount: nonWhitespace.length,
+      garbledRatio,
+      usable:
+        nonWhitespace.length >= MIN_PAGE_TEXT_LENGTH && garbledRatio <= MAX_GARBLED_TEXT_RATIO,
+    },
+  };
+}
+
+function pdfJsAssetUrl(directory: 'cmaps' | 'standard_fonts'): string {
+  // `require.resolve()` is rewritten to a numeric module id by webpack when
+  // used in route code. `process.cwd()` remains the deployment root on Vercel,
+  // and next.config explicitly traces these package assets into the function.
+  const assetDirectory = path.join(process.cwd(), 'node_modules', 'pdfjs-dist', directory, path.sep);
+  return pathToFileURL(assetDirectory).href;
+}
+
+/** Render only an OCR-target page and cap dimensions before paying image-token cost. */
+async function renderPageDataUrl(page: PDFPageProxy): Promise<`data:image/png;base64,${string}`> {
+  const { createCanvas } = await import('@napi-rs/canvas');
+  const baseViewport = page.getViewport({ scale: 1 });
+  const scale = Math.min(
+    OCR_RENDER_SCALE,
+    OCR_MAX_IMAGE_DIMENSION / Math.max(baseViewport.width, baseViewport.height),
+  );
+  const viewport = page.getViewport({ scale });
+  const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+
+  await page.render({
+    canvas: canvas as unknown as HTMLCanvasElement,
+    viewport,
+    background: '#ffffff',
+  }).promise;
+
+  return `data:image/png;base64,${canvas.toBuffer('image/png').toString('base64')}`;
+}
+
+async function defaultOcrPage(input: Parameters<OcrPage>[0]): Promise<string> {
+  // Keep OpenAI and its key completely off the native-only path.
+  const { ocrPageImage } = await import('./ocr');
+  return ocrPageImage(input);
+}
+
+/**
+ * Two-stage, page-preserving extraction: native first, OCR only when required.
+ * Pages are processed sequentially to bound both serverless memory and API load.
+ */
+export async function extractPdfPages(
+  data: Uint8Array,
+  options: ExtractPdfOptions = {},
+): Promise<PdfExtractionResult> {
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
   let loadingTask: ReturnType<typeof pdfjs.getDocument> | null = null;
 
   try {
     loadingTask = pdfjs.getDocument({
       data,
-      // Hardening for untrusted uploads: no remote fetches while parsing, and
-      // no font installation. We only ever read the text layer, so none of the
-      // rendering machinery needs to be active.
-      //
-      // (pdf.js <= v5 also took `isEvalSupported`; v6 removed it because the
-      // font compiler no longer uses eval at all, so there is nothing left to
-      // switch off.)
+      cMapUrl: pdfJsAssetUrl('cmaps'),
+      cMapPacked: true,
+      standardFontDataUrl: pdfJsAssetUrl('standard_fonts'),
       useSystemFonts: false,
       useWorkerFetch: false,
       disableFontFace: true,
@@ -127,38 +203,101 @@ export async function extractPdfPages(data: Uint8Array): Promise<PdfExtractionRe
     if (!Number.isInteger(pageCount) || pageCount < 1) {
       throw new AppError('pdf_unreadable', { detail: `unexpected page count: ${pageCount}` });
     }
-
     if (pageCount > MAX_PAGE_COUNT) {
       throw new AppError('too_many_pages', { detail: `page count ${pageCount} > ${MAX_PAGE_COUNT}` });
     }
 
     const pages: PdfPage[] = [];
+    const warnings: PdfExtractionWarning[] = [];
+    const terminalOcrErrors: AppError[] = [];
     let totalCharacters = 0;
+    let nativePageCount = 0;
+    let ocrPageCount = 0;
+    const ocrPage = options.ocrPage ?? defaultOcrPage;
 
-    // Sequential on purpose: pdf.js keeps per-page resources alive, and 100
-    // concurrent pages is a reliable way to blow the memory limit of a
-    // serverless function.
     for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
       const page = await doc.getPage(pageNumber);
       try {
-        const content = await page.getTextContent();
-        const text = normalizePageText(joinTextItems(content.items as TextItemLike[]));
+        let native = evaluatePageText('');
+        try {
+          const content = await page.getTextContent();
+          native = evaluatePageText(joinTextItems(content.items as TextItemLike[]));
+        } catch {
+          // A damaged text layer can still have a renderable image for OCR.
+        }
 
-        pages.push({ pageNumber, text });
-        if (text.length >= MIN_PAGE_TEXT_LENGTH) totalCharacters += text.length;
+        if (native.quality.usable) {
+          pages.push({ pageNumber, ...native, nativeQuality: native.quality, source: 'native' });
+          totalCharacters += native.quality.characterCount;
+          nativePageCount += 1;
+          continue;
+        }
+
+        try {
+          const imageDataUrl = await renderPageDataUrl(page);
+          const ocr = evaluatePageText(await ocrPage({ pageNumber, imageDataUrl }));
+
+          if (ocr.quality.usable) {
+            pages.push({
+              pageNumber,
+              ...ocr,
+              nativeQuality: native.quality,
+              source: 'ocr',
+            });
+            totalCharacters += ocr.quality.characterCount;
+            ocrPageCount += 1;
+          } else {
+            pages.push({
+              pageNumber,
+              ...ocr,
+              text: '',
+              nativeQuality: native.quality,
+              source: 'unavailable',
+            });
+            warnings.push({ pageNumber, code: 'ocr_no_text' });
+          }
+        } catch (error) {
+          const appError =
+            error instanceof AppError && (error.code === 'ocr_timeout' || error.code === 'ocr_failed')
+              ? error
+              : new AppError('ocr_failed', {
+                  cause: error,
+                  detail: error instanceof Error ? error.message : 'page rendering or OCR failed',
+                });
+
+          terminalOcrErrors.push(appError);
+          pages.push({
+            pageNumber,
+            ...native,
+            text: '',
+            nativeQuality: native.quality,
+            source: 'unavailable',
+          });
+          warnings.push({ pageNumber, code: appError.code as 'ocr_failed' | 'ocr_timeout' });
+        }
       } finally {
         page.cleanup();
       }
     }
 
-    // A PDF where no page carries a meaningful text layer is a scanned image.
-    // OCR is out of scope, so fail explicitly instead of storing a document
-    // that could never answer a question.
-    if (totalCharacters === 0) {
-      throw new AppError('pdf_no_text', { detail: 'no page reached the minimum text length' });
+    if (nativePageCount + ocrPageCount === 0) {
+      const timeout = terminalOcrErrors.find((error) => error.code === 'ocr_timeout');
+      if (timeout) throw timeout;
+      if (terminalOcrErrors.length > 0) throw terminalOcrErrors[0];
+      throw new AppError('pdf_no_text', { detail: 'native extraction and OCR produced no usable pages' });
     }
 
-    return { pageCount, pages, totalCharacters };
+    return {
+      pageCount,
+      pages,
+      totalCharacters,
+      nativePageCount,
+      ocrPageCount,
+      skippedPageNumbers: pages
+        .filter((page) => page.source === 'unavailable')
+        .map((page) => page.pageNumber),
+      warnings,
+    };
   } catch (error) {
     if (error instanceof AppError) throw error;
     throw new AppError('pdf_unreadable', {
@@ -166,7 +305,6 @@ export async function extractPdfPages(data: Uint8Array): Promise<PdfExtractionRe
       detail: error instanceof Error ? error.message : 'unknown pdf parse failure',
     });
   } finally {
-    // Release the worker/port regardless of outcome.
     await loadingTask?.destroy().catch(() => undefined);
   }
 }

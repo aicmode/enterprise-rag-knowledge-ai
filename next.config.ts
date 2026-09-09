@@ -9,7 +9,16 @@ const nextConfig: NextConfig = {
    * runtime in a serverless function. Marking it external means the real
    * package is loaded from node_modules instead.
    */
-  serverExternalPackages: ['pdfjs-dist'],
+  serverExternalPackages: ['pdfjs-dist', '@napi-rs/canvas'],
+
+  // PDF.js loads these by URL at runtime rather than through an import, so the
+  // serverless file tracer needs an explicit include for the processing route.
+  outputFileTracingIncludes: {
+    '/api/documents/process': [
+      './node_modules/pdfjs-dist/cmaps/**/*',
+      './node_modules/pdfjs-dist/standard_fonts/**/*',
+    ],
+  },
 
   // Note: Next 16 no longer runs ESLint as part of `next build`, and the
   // `eslint` config block was removed with it. Linting is its own step

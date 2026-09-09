@@ -34,6 +34,15 @@ export const MAX_QUESTION_LENGTH = 1000;
  */
 export const MIN_PAGE_TEXT_LENGTH = 20;
 
+/** Maximum tolerated share of suspicious glyphs before native text needs OCR. */
+export const MAX_GARBLED_TEXT_RATIO = 0.2;
+
+/** Rendered-page bounds keep OCR images readable without unbounded memory/token use. */
+export const OCR_RENDER_SCALE = 2;
+export const OCR_MAX_IMAGE_DIMENSION = 2048;
+export const OCR_MAX_OUTPUT_TOKENS = 4000;
+export const OCR_TIMEOUT_MS = 60_000;
+
 /** How many embedding inputs to send to OpenAI per request. */
 export const EMBEDDING_BATCH_SIZE = 64;
 
@@ -48,6 +57,8 @@ export interface RagConfig {
   similarityThreshold: number;
   /** Chat model used for answer generation. */
   chatModel: string;
+  /** Vision-capable model used only for page-level OCR fallback. */
+  ocrModel: string;
 }
 
 export const RAG_DEFAULTS: RagConfig = {
@@ -56,6 +67,7 @@ export const RAG_DEFAULTS: RagConfig = {
   topK: 5,
   similarityThreshold: 0.3,
   chatModel: 'gpt-4o-mini',
+  ocrModel: 'gpt-5-mini',
 };
 
 function clamp(value: number, min: number, max: number): number {
@@ -80,6 +92,7 @@ export type RawRagEnv = {
   RAG_TOP_K?: string;
   RAG_SIMILARITY_THRESHOLD?: string;
   OPENAI_CHAT_MODEL?: string;
+  OPENAI_OCR_MODEL?: string;
 };
 
 /**
@@ -106,5 +119,6 @@ export function resolveRagConfig(env: RawRagEnv = {}): RagConfig {
       1,
     ),
     chatModel: env.OPENAI_CHAT_MODEL?.trim() || RAG_DEFAULTS.chatModel,
+    ocrModel: env.OPENAI_OCR_MODEL?.trim() || RAG_DEFAULTS.ocrModel,
   };
 }

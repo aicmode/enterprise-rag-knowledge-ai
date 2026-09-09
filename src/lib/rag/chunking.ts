@@ -1,5 +1,5 @@
 import { MIN_PAGE_TEXT_LENGTH, type RagConfig } from '@/lib/config/rag';
-import type { PdfPage } from './pdf';
+import type { PdfPageText } from './pdf';
 
 /**
  * Page-aware chunking.
@@ -124,7 +124,7 @@ export function chunkPageText(
  * call and could only ever surface as a useless citation.
  */
 export function chunkPages(
-  pages: readonly PdfPage[],
+  pages: readonly PdfPageText[],
   config: Pick<RagConfig, 'chunkSize' | 'chunkOverlap'>,
 ): DocumentChunk[] {
   const result: DocumentChunk[] = [];

@@ -105,6 +105,8 @@ describe('toErrorResponse', () => {
       'too_many_pages',
       'pdf_unreadable',
       'pdf_no_text',
+      'ocr_failed',
+      'ocr_timeout',
       'storage_failed',
       'database_failed',
       'embedding_failed',

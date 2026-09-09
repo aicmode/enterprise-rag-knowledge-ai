@@ -19,6 +19,7 @@ describe('resolveRagConfig', () => {
       RAG_TOP_K: '8',
       RAG_SIMILARITY_THRESHOLD: '0.45',
       OPENAI_CHAT_MODEL: 'gpt-4o',
+      OPENAI_OCR_MODEL: 'gpt-5-mini',
     });
 
     expect(config).toEqual({
@@ -27,6 +28,7 @@ describe('resolveRagConfig', () => {
       topK: 8,
       similarityThreshold: 0.45,
       chatModel: 'gpt-4o',
+      ocrModel: 'gpt-5-mini',
     });
   });
 
@@ -67,6 +69,16 @@ describe('resolveRagConfig', () => {
 
   it('treats a blank chat model as unset', () => {
     expect(resolveRagConfig({ OPENAI_CHAT_MODEL: '   ' }).chatModel).toBe(RAG_DEFAULTS.chatModel);
+  });
+
+  it('keeps answer and OCR models independently configurable', () => {
+    const config = resolveRagConfig({
+      OPENAI_CHAT_MODEL: 'gpt-5-mini',
+      OPENAI_OCR_MODEL: 'gpt-5-nano',
+    });
+
+    expect(config.chatModel).toBe('gpt-5-mini');
+    expect(config.ocrModel).toBe('gpt-5-nano');
   });
 
   it('never produces a negative overlap', () => {

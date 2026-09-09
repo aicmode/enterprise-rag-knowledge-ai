@@ -17,17 +17,19 @@ import { extractPdfPages } from './pdf';
  *
  *   Storage PDF -> page-wise text -> page-aware chunks -> embeddings -> pgvector
  *
- * Failure policy: a document is only ever marked `ready` when every stage
- * succeeded. Any failure marks it `failed` with a user-safe message and leaves
- * no partial chunks behind, because a half-embedded document would silently
- * answer questions from an incomplete corpus -- the worst possible failure mode
- * for a system whose value proposition is trustworthiness.
+ * Failure policy: page-level OCR failures are recoverable when at least one
+ * page remains usable; the document is marked `ready` with an explicit page
+ * warning. Extraction-wide or downstream failures mark it `failed` and remove
+ * all chunks. A document is never exposed with half-written embedding batches.
  */
 
 export interface IngestResult {
   documentId: string;
   pageCount: number;
   chunkCount: number;
+  nativePageCount: number;
+  ocrPageCount: number;
+  skippedPageNumbers: number[];
 }
 
 /**
@@ -194,12 +196,17 @@ export async function processDocument(
     }
 
     // --- 6. Ready -----------------------------------------------------------
+    const partialWarning =
+      extraction.skippedPageNumbers.length > 0
+        ? `一部のページ（P.${extraction.skippedPageNumbers.join(', P.')}）は文字を読み取れなかったため、利用可能なページのみ登録しました。`
+        : null;
+
     const { error: readyError } = await admin
       .from('documents')
       .update({
         status: 'ready',
         page_count: extraction.pageCount,
-        error_message: null,
+        error_message: partialWarning,
       })
       .eq('id', documentId);
 
@@ -207,7 +214,14 @@ export async function processDocument(
       throw new AppError('database_failed', { cause: readyError, detail: readyError.message });
     }
 
-    return { documentId, pageCount: extraction.pageCount, chunkCount: chunks.length };
+    return {
+      documentId,
+      pageCount: extraction.pageCount,
+      chunkCount: chunks.length,
+      nativePageCount: extraction.nativePageCount,
+      ocrPageCount: extraction.ocrPageCount,
+      skippedPageNumbers: extraction.skippedPageNumbers,
+    };
   } catch (error) {
     const appError = toAppError(error, 'embedding_failed');
 

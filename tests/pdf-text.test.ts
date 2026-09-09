@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { joinTextItems, normalizePageText } from '@/lib/rag/pdf';
+import { evaluatePageText, joinTextItems, normalizePageText } from '@/lib/rag/pdf';
 
 describe('joinTextItems', () => {
   it('returns an empty string for no items', () => {
@@ -64,5 +64,28 @@ describe('normalizePageText', () => {
 
   it('returns an empty string for whitespace-only input', () => {
     expect(normalizePageText('  \n\n 　 ')).toBe('');
+  });
+});
+
+describe('evaluatePageText', () => {
+  it('reports page-level counts after normalization', () => {
+    const result = evaluatePageText('従業員 は週に最大3日までリモート勤務を利用できます。');
+
+    expect(result.quality.characterCount).toBe(Array.from(result.text).length);
+    expect(result.quality.nonWhitespaceCharacterCount).toBe(
+      Array.from(result.text).filter((char) => !/\s/u.test(char)).length,
+    );
+    expect(result.quality.usable).toBe(true);
+  });
+
+  it('marks replacement and private-use glyphs as garbled', () => {
+    const result = evaluatePageText('正常な文字列です'.padEnd(20, '\ufffd'));
+
+    expect(result.quality.garbledRatio).toBeGreaterThan(0.2);
+    expect(result.quality.usable).toBe(false);
+  });
+
+  it('keeps full-width Japanese content intact', () => {
+    expect(normalizePageText('ＡＢＣ　１２３　日本語')).toBe('ＡＢＣ １２３ 日本語');
   });
 });
