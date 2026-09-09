@@ -1,59 +1,46 @@
 import { NextResponse } from 'next/server';
 
 import { errorJson, okJson, readJson } from '@/lib/api';
+import { MAX_DOCUMENTS_PER_SESSION } from '@/lib/config/rag';
+import { countDocuments, createDocument } from '@/lib/db/documents';
 import { AppError } from '@/lib/errors';
-import { requireUser } from '@/lib/supabase/server';
+import { requireSessionId } from '@/lib/session-server';
 import { registerDocumentSchema } from '@/lib/validation/document';
 
 export const runtime = 'nodejs';
 
 /**
- * Register the metadata row for a PDF the browser has just uploaded to Storage.
+ * Create the metadata row for a PDF the browser is about to upload.
  *
- * The file itself never passes through this endpoint -- see the README on why
- * the PDF goes browser -> Storage directly rather than through a serverless
- * function.
+ * Registration comes *first* so the upload parts have a row to hang off, and so
+ * the per-session document quota is enforced before any bytes are accepted --
+ * rejecting a 10 MB upload after it has already been transferred would be a
+ * waste of the visitor's bandwidth and the demo's budget.
  *
- * Security: the client proposes a `storagePath`, so it is not trusted. The path
- * is re-derived from the authenticated user id and the document id, and the
- * request is rejected unless it matches exactly. That prevents a caller from
- * registering a row that points at someone else's object.
+ * The row is always written with the session id resolved from the httpOnly
+ * cookie; nothing about ownership is taken from the request body.
  */
 export async function POST(request: Request): Promise<NextResponse> {
   try {
-    const { supabase, user } = await requireUser();
+    const sessionId = await requireSessionId();
 
     const parsed = registerDocumentSchema.safeParse(await readJson(request));
     if (!parsed.success) {
       throw new AppError('validation_failed', { detail: parsed.error.message });
     }
 
-    const { documentId, title, fileName, storagePath, fileSize } = parsed.data;
-
-    const expectedPrefix = `${user.id}/${documentId}/`;
-    if (!storagePath.startsWith(expectedPrefix) || storagePath.includes('..')) {
-      throw new AppError('forbidden', { detail: 'storage path does not match the caller' });
+    const existing = await countDocuments(sessionId);
+    if (existing >= MAX_DOCUMENTS_PER_SESSION) {
+      throw new AppError('quota_exceeded', {
+        detail: `session already has ${existing} documents`,
+      });
     }
 
-    const { data, error } = await supabase
-      .from('documents')
-      .insert({
-        id: documentId,
-        user_id: user.id,
-        title,
-        file_name: fileName,
-        storage_path: storagePath,
-        file_size: fileSize,
-        status: 'uploaded',
-      })
-      .select('id, title, file_name, status, created_at')
-      .single();
+    const { documentId, title, fileName, fileSize } = parsed.data;
 
-    if (error) {
-      throw new AppError('database_failed', { cause: error, detail: error.message });
-    }
+    const document = await createDocument({ documentId, sessionId, title, fileName, fileSize });
 
-    return okJson({ document: data }, 201);
+    return okJson({ document }, 201);
   } catch (error) {
     return errorJson(error, 'documents/register', 'database_failed');
   }

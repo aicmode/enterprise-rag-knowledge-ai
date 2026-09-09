@@ -10,13 +10,23 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 
 import { PageHeader } from '@/components/layout/page-header';
+import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { StatusBadge } from '@/components/ui/status-badge';
+import {
+  countDocuments,
+  countReadyDocuments,
+  listRecentDocuments,
+} from '@/lib/db/documents';
+import {
+  countQuestions,
+  getFeedbackTotals,
+  listRecentQuestions,
+} from '@/lib/db/questions';
 import { formatDateTime, formatPercent, truncate } from '@/lib/format';
-import { createServerSupabaseClient } from '@/lib/supabase/server';
-import type { DocumentRow, QuestionRow } from '@/lib/types';
+import { getSessionId } from '@/lib/session-server';
 
 export const metadata: Metadata = { title: 'ダッシュボード' };
 export const dynamic = 'force-dynamic';
@@ -25,54 +35,48 @@ export const dynamic = 'force-dynamic';
  * Dashboard.
  *
  * A Server Component throughout -- it is read-only, so none of it needs to ship
- * JavaScript. The counts use `head: true` so Postgres returns a count without
- * transferring any rows.
+ * JavaScript. The counts are `count(*)` aggregates, so Postgres never transfers
+ * the rows themselves.
  */
 export default async function DashboardPage() {
-  const supabase = await createServerSupabaseClient();
+  const sessionId = await getSessionId();
 
-  // Independent reads, issued concurrently. Every one of them is constrained to
-  // the current user by RLS.
+  if (!sessionId) {
+    // The proxy mints the session cookie before anything renders, so this only
+    // happens if the request bypassed it entirely. Rendering zeroes would be a
+    // lie; say what is actually wrong instead.
+    return (
+      <div className="space-y-6">
+        <PageHeader title="ダッシュボード" />
+        <Alert tone="error">
+          デモセッションを開始できませんでした。ページを再読み込みしてください。
+        </Alert>
+      </div>
+    );
+  }
+
+  // Independent reads, issued concurrently. Every one of them is scoped to this
+  // visitor's demo session.
   const [
     totalDocuments,
     readyDocuments,
     totalQuestions,
-    helpfulFeedback,
-    totalFeedback,
-    recentDocuments,
-    recentQuestions,
+    feedbackTotals,
+    documents,
+    questions,
   ] = await Promise.all([
-    supabase.from('documents').select('id', { count: 'exact', head: true }),
-    supabase.from('documents').select('id', { count: 'exact', head: true }).eq('status', 'ready'),
-    supabase.from('questions').select('id', { count: 'exact', head: true }),
-    supabase
-      .from('answer_feedback')
-      .select('id', { count: 'exact', head: true })
-      .eq('rating', 'helpful'),
-    supabase.from('answer_feedback').select('id', { count: 'exact', head: true }),
-    supabase
-      .from('documents')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(5),
-    supabase
-      .from('questions')
-      .select('id, question, created_at')
-      .order('created_at', { ascending: false })
-      .limit(5),
+    countDocuments(sessionId),
+    countReadyDocuments(sessionId),
+    countQuestions(sessionId),
+    getFeedbackTotals(sessionId),
+    listRecentDocuments(sessionId, 5),
+    listRecentQuestions(sessionId, 5),
   ]);
 
-  const feedbackCount = totalFeedback.count ?? 0;
-  const helpfulCount = helpfulFeedback.count ?? 0;
-  const helpfulRate = feedbackCount > 0 ? helpfulCount / feedbackCount : null;
+  const feedbackCount = feedbackTotals.total;
+  const helpfulRate = feedbackCount > 0 ? feedbackTotals.helpful / feedbackCount : null;
 
-  const documents = (recentDocuments.data ?? []) as DocumentRow[];
-  const questions = (recentQuestions.data ?? []) as Pick<
-    QuestionRow,
-    'id' | 'question' | 'created_at'
-  >[];
-
-  const hasNoDocuments = (totalDocuments.count ?? 0) === 0;
+  const hasNoDocuments = totalDocuments === 0;
 
   return (
     <div className="space-y-6">
@@ -86,20 +90,20 @@ export default async function DashboardPage() {
         <StatCard
           icon={FileText}
           label="登録資料数"
-          value={String(totalDocuments.count ?? 0)}
+          value={String(totalDocuments)}
           unit="件"
         />
         <StatCard
           icon={CheckCircle2}
           label="解析完了"
-          value={String(readyDocuments.count ?? 0)}
+          value={String(readyDocuments)}
           unit="件"
           hint="質問の根拠として利用可能"
         />
         <StatCard
           icon={MessageSquareText}
           label="累計質問数"
-          value={String(totalQuestions.count ?? 0)}
+          value={String(totalQuestions)}
           unit="件"
         />
         <StatCard

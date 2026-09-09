@@ -1,10 +1,13 @@
 /**
  * Application-level domain types.
  *
- * These mirror the SQL schema in `supabase/migrations/`. They are hand-written
- * rather than generated so the repository stays readable without a live
- * Supabase project; `supabase gen types typescript` can replace them once a
- * project is linked (see README).
+ * These mirror the SQL schema in `db/migrations/`. They are hand-written so the
+ * repository stays readable without a live database, and each one matches the
+ * exact column list its query selects.
+ *
+ * Note `session_id` where a conventional app would have `user_id`: this
+ * deployment is a public demo with no sign-in, and rows are partitioned by an
+ * anonymous demo session instead. See `src/lib/session.ts`.
  */
 
 export type DocumentStatus = 'uploaded' | 'processing' | 'ready' | 'failed';
@@ -13,11 +16,11 @@ export type FeedbackRating = 'helpful' | 'not_helpful';
 
 export interface DocumentRow {
   id: string;
-  user_id: string;
+  session_id: string;
   title: string;
   file_name: string;
-  storage_path: string;
   file_size: number;
+  content_type: string;
   page_count: number | null;
   status: DocumentStatus;
   error_message: string | null;
@@ -36,7 +39,7 @@ export interface DocumentChunkRow {
 }
 
 /**
- * One row returned by the `match_document_chunks` RPC.
+ * One row returned by the `match_document_chunks` function.
  * This is the raw retrieval result, before it is turned into a citation.
  */
 export interface MatchedChunk {
@@ -71,7 +74,7 @@ export interface Citation {
 
 export interface QuestionRow {
   id: string;
-  user_id: string;
+  session_id: string;
   question: string;
   answer: string;
   sources: Citation[];
@@ -80,18 +83,29 @@ export interface QuestionRow {
   created_at: string;
 }
 
+/** History list row: the citation payload is reduced to a count in SQL. */
+export interface QuestionSummary {
+  id: string;
+  question: string;
+  answer: string;
+  source_count: number;
+  created_at: string;
+  rating: FeedbackRating | null;
+}
+
+/** History detail row: the full question joined with this session's rating. */
+export interface QuestionWithFeedback extends QuestionRow {
+  rating: FeedbackRating | null;
+}
+
 export interface AnswerFeedbackRow {
   id: string;
   question_id: string;
-  user_id: string;
+  session_id: string;
   rating: FeedbackRating;
   comment: string | null;
   created_at: string;
   updated_at: string;
-}
-
-export interface QuestionWithFeedback extends QuestionRow {
-  feedback: { rating: FeedbackRating } | null;
 }
 
 /** Successful payload of `POST /api/ask`. */

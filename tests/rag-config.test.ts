@@ -88,7 +88,7 @@ describe('resolveRagConfig', () => {
 
 describe('EMBEDDING_DIMENSIONS', () => {
   it('matches the vector(1536) column in the migration', () => {
-    // If this ever changes, supabase/migrations must change with it -- the
+    // If this ever changes, db/migrations must change with it -- the
     // constant and the DDL are two halves of one decision.
     expect(EMBEDDING_DIMENSIONS).toBe(1536);
   });

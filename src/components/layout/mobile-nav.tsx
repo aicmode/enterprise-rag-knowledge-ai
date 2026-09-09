@@ -4,8 +4,8 @@ import { Menu, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 import { Brand } from './brand';
+import { DemoSessionMenu } from './demo-session-menu';
 import { SidebarNav } from './sidebar-nav';
-import { UserMenu } from './user-menu';
 
 /**
  * Mobile header + slide-in drawer.
@@ -17,7 +17,7 @@ import { UserMenu } from './user-menu';
  *  - tapping a link closes it, so navigation does not leave the drawer covering
  *    the destination.
  */
-export function MobileNav({ email, displayName }: { email: string; displayName: string | null }) {
+export function MobileNav({ sessionLabel }: { sessionLabel: string | null }) {
   const [isOpen, setIsOpen] = useState(false);
 
   useEffect(() => {
@@ -84,7 +84,7 @@ export function MobileNav({ email, displayName }: { email: string; displayName: 
               <SidebarNav onNavigate={() => setIsOpen(false)} />
             </div>
 
-            <UserMenu email={email} displayName={displayName} />
+            <DemoSessionMenu sessionLabel={sessionLabel} />
           </div>
         </div>
       ) : null}

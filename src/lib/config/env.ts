@@ -8,38 +8,43 @@ import { resolveRagConfig, type RagConfig } from './rag';
  * Server-side environment access.
  *
  * `import 'server-only'` makes it a *build error* for a Client Component to
- * pull this file into the browser bundle, so the service-role key and the
- * OpenAI key cannot leak by accident during a refactor. Public values live in
- * `publicEnv` below and are the only ones safe to reference from client code.
+ * pull this file into the browser bundle, so the database URL and the OpenAI
+ * key cannot leak by accident during a refactor. This application has no
+ * `NEXT_PUBLIC_*` variables at all: the browser talks only to this app's own
+ * route handlers, never directly to Postgres or OpenAI.
  */
 
 /**
  * Validation is split by *what the caller actually needs*, not by what a fully
  * configured deployment happens to have.
  *
- * The two groups used to be one schema, which meant `getServerEnv()` demanded
- * an OpenAI key before it would hand back a Supabase URL. That coupling turned
- * a missing or rotated `OPENAI_API_KEY` into a 500 on operations that never
- * call OpenAI at all -- deleting a document, or asking a question while no
- * documents are registered yet. Losing the ability to answer questions is
- * expected when the model provider is unconfigured; losing the ability to
- * delete your own PDF is not.
+ * The two groups used to be one schema, which meant the database URL could not
+ * be read back without an OpenAI key also being present. That coupling turned a
+ * missing or rotated `OPENAI_API_KEY` into a 500 on operations that never call
+ * OpenAI at all -- deleting a document, or asking a question while no documents
+ * are registered yet. Losing the ability to answer questions is expected when
+ * the model provider is unconfigured; losing the ability to delete your own PDF
+ * is not.
  *
  * Each group is still validated at its point of use, so a genuinely
  * misconfigured deployment fails loudly on the first request that needs the
  * missing variable.
  */
-const supabaseEnvSchema = z.object({
-  NEXT_PUBLIC_SUPABASE_URL: z.string().url('NEXT_PUBLIC_SUPABASE_URL must be a valid URL'),
-  NEXT_PUBLIC_SUPABASE_ANON_KEY: z.string().min(1, 'NEXT_PUBLIC_SUPABASE_ANON_KEY is required'),
-  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1, 'SUPABASE_SERVICE_ROLE_KEY is required'),
+const databaseEnvSchema = z.object({
+  DATABASE_URL: z
+    .string()
+    .min(1, 'DATABASE_URL is required')
+    .refine(
+      (value) => /^postgres(ql)?:\/\//.test(value),
+      'DATABASE_URL must be a postgres:// connection string',
+    ),
 });
 
 const openAiEnvSchema = z.object({
   OPENAI_API_KEY: z.string().min(1, 'OPENAI_API_KEY is required'),
 });
 
-export type ServerEnv = z.infer<typeof supabaseEnvSchema> & { rag: RagConfig };
+export type ServerEnv = z.infer<typeof databaseEnvSchema> & { rag: RagConfig };
 
 let cached: ServerEnv | null = null;
 let cachedOpenAIKey: string | null = null;
@@ -51,7 +56,7 @@ function configError(issues: { path: PropertyKey[] }[]): Error {
 }
 
 /**
- * Validate and return the Supabase-side server environment plus RAG tuning.
+ * Validate and return the database-side server environment plus RAG tuning.
  *
  * Called lazily from request handlers rather than at module load so that
  * `next build` does not require production secrets to be present.
@@ -59,11 +64,7 @@ function configError(issues: { path: PropertyKey[] }[]): Error {
 export function getServerEnv(): ServerEnv {
   if (cached) return cached;
 
-  const parsed = supabaseEnvSchema.safeParse({
-    NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
-    NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-    SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
-  });
+  const parsed = databaseEnvSchema.safeParse({ DATABASE_URL: process.env.DATABASE_URL });
 
   if (!parsed.success) {
     throw configError(parsed.error.issues);
@@ -84,11 +85,16 @@ export function getServerEnv(): ServerEnv {
   return cached;
 }
 
+/** The Postgres connection string, validated on first use. */
+export function getDatabaseUrl(): string {
+  return getServerEnv().DATABASE_URL;
+}
+
 /**
  * The OpenAI API key, validated on first use.
  *
- * Kept separate from `getServerEnv()` so that only the embedding and answering
- * paths depend on it.
+ * Kept separate from `getServerEnv()` so that only the embedding, OCR and
+ * answering paths depend on it.
  */
 export function getOpenAIApiKey(): string {
   if (cachedOpenAIKey) return cachedOpenAIKey;

@@ -77,7 +77,7 @@ describe('toErrorResponse', () => {
   it('logs the internal detail server-side', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    toErrorResponse(new Error('internal detail'), 'ctx', 'storage_failed');
+    toErrorResponse(new Error('internal detail'), 'ctx', 'database_failed');
 
     expect(spy).toHaveBeenCalled();
     expect(String(spy.mock.calls[0]?.[0])).toContain('internal detail');
@@ -85,10 +85,11 @@ describe('toErrorResponse', () => {
     spy.mockRestore();
   });
 
-  it('maps auth failures to 401 and not-found to 404', () => {
+  it('maps demo-quota failures to 429 and not-found to 404', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    expect(toErrorResponse(new AppError('unauthorized'), 'ctx').status).toBe(401);
+    expect(toErrorResponse(new AppError('rate_limited'), 'ctx').status).toBe(429);
+    expect(toErrorResponse(new AppError('quota_exceeded'), 'ctx').status).toBe(429);
     expect(toErrorResponse(new AppError('not_found'), 'ctx').status).toBe(404);
 
     spy.mockRestore();
@@ -96,8 +97,6 @@ describe('toErrorResponse', () => {
 
   it('gives every error code a non-empty Japanese message', () => {
     const codes = [
-      'unauthorized',
-      'forbidden',
       'not_found',
       'validation_failed',
       'invalid_file_type',
@@ -107,12 +106,14 @@ describe('toErrorResponse', () => {
       'pdf_no_text',
       'ocr_failed',
       'ocr_timeout',
-      'storage_failed',
+      'upload_incomplete',
       'database_failed',
       'embedding_failed',
       'retrieval_failed',
       'answer_failed',
       'rate_limited',
+      'quota_exceeded',
+      'session_unavailable',
       'already_processing',
       'internal_error',
     ] as const;

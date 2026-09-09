@@ -6,23 +6,14 @@ import { notFound } from 'next/navigation';
 import { CitationList } from '@/components/ask/citation-card';
 import { FeedbackButtons } from '@/components/ask/feedback-buttons';
 import { Card, CardBody } from '@/components/ui/card';
+import { getQuestion } from '@/lib/db/questions';
 import { formatDateTime, formatDuration } from '@/lib/format';
-import { createServerSupabaseClient } from '@/lib/supabase/server';
-import type { Citation, FeedbackRating } from '@/lib/types';
+import { getSessionId } from '@/lib/session-server';
 
 export const metadata: Metadata = { title: '質問の詳細' };
 export const dynamic = 'force-dynamic';
 
-interface DetailRow {
-  id: string;
-  question: string;
-  answer: string;
-  sources: Citation[];
-  model: string;
-  response_time_ms: number | null;
-  created_at: string;
-  answer_feedback: { rating: FeedbackRating }[];
-}
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Detail view for one archived answer.
@@ -38,21 +29,18 @@ export default async function HistoryDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const supabase = await createServerSupabaseClient();
+  const sessionId = await getSessionId();
 
-  // RLS scopes this to the owner: another user's question id yields no row and
+  if (!sessionId || !UUID_RE.test(id)) notFound();
+
+  // Scoped to the demo session: another visitor's question id yields no row and
   // therefore a 404, never someone else's data.
-  const { data, error } = await supabase
-    .from('questions')
-    .select('id, question, answer, sources, model, response_time_ms, created_at, answer_feedback(rating)')
-    .eq('id', id)
-    .maybeSingle();
+  const row = await getQuestion(sessionId, id);
 
-  if (error || !data) notFound();
+  if (!row) notFound();
 
-  const row = data as DetailRow;
   const citations = Array.isArray(row.sources) ? row.sources : [];
-  const rating = row.answer_feedback?.[0]?.rating ?? null;
+  const rating = row.rating;
 
   return (
     <div className="space-y-6">

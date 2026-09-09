@@ -3,7 +3,8 @@ import type { Metadata } from 'next';
 import { DocumentManager } from '@/components/documents/document-manager';
 import { PageHeader } from '@/components/layout/page-header';
 import { Alert } from '@/components/ui/alert';
-import { createServerSupabaseClient } from '@/lib/supabase/server';
+import { listDocuments } from '@/lib/db/documents';
+import { getSessionId } from '@/lib/session-server';
 import type { DocumentRow } from '@/lib/types';
 
 export const metadata: Metadata = { title: '資料' };
@@ -15,17 +16,24 @@ export const dynamic = 'force-dynamic';
 /**
  * Documents screen.
  *
- * A Server Component fetches the list (RLS restricts it to the caller) and
- * hands it to a Client Component that owns the interactive upload flow. Only
- * the interactive part ships JavaScript.
+ * A Server Component fetches the list (scoped to the visitor's demo session)
+ * and hands it to a Client Component that owns the interactive upload flow.
+ * Only the interactive part ships JavaScript.
  */
 export default async function DocumentsPage() {
-  const supabase = await createServerSupabaseClient();
+  const sessionId = await getSessionId();
 
-  const { data, error } = await supabase
-    .from('documents')
-    .select('*')
-    .order('created_at', { ascending: false });
+  let documents: DocumentRow[] = [];
+  let failed = false;
+
+  if (sessionId) {
+    try {
+      documents = await listDocuments(sessionId);
+    } catch (error) {
+      console.error('[documents] failed to load documents', error);
+      failed = true;
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -34,10 +42,10 @@ export default async function DocumentsPage() {
         description="社内マニュアルや規程のPDFを登録します。登録された資料のみがAI回答の根拠になります。"
       />
 
-      {error ? (
+      {failed ? (
         <Alert tone="error">資料の読み込みに失敗しました。時間をおいて再度お試しください。</Alert>
       ) : (
-        <DocumentManager initialDocuments={(data ?? []) as DocumentRow[]} />
+        <DocumentManager initialDocuments={documents} />
       )}
     </div>
   );

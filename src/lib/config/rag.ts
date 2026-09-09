@@ -11,16 +11,39 @@
  * Dimension of `text-embedding-3-small`.
  *
  * This MUST stay in sync with `vector(1536)` in
- * `supabase/migrations/0001_extensions_and_tables.sql`. Changing the embedding
- * model to one with a different dimension is a migration, not a config change.
+ * `db/migrations/0001_schema.sql`. Changing the embedding model to one with a
+ * different dimension is a migration, not a config change.
  */
 export const EMBEDDING_DIMENSIONS = 1536;
 
 export const EMBEDDING_MODEL = 'text-embedding-3-small';
 
-/** Hard limits on ingestion, mirrored in the DB constraints and Storage bucket. */
+/** Hard limits on ingestion, mirrored by the CHECK constraints on `documents`. */
 export const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 export const MAX_PAGE_COUNT = 100;
+
+/**
+ * Size of one upload part.
+ *
+ * Vercel caps a serverless function request body at 4.5 MB, but the product
+ * accepts 10 MB PDFs, so the browser slices the file and sends it in parts.
+ * 3 MB leaves comfortable headroom under that cap while keeping a 10 MB upload
+ * to four requests.
+ */
+export const UPLOAD_PART_SIZE_BYTES = 3 * 1024 * 1024;
+
+/** Upper bound on part index, derived so the two limits cannot drift apart. */
+export const MAX_UPLOAD_PARTS = Math.ceil(MAX_FILE_SIZE_BYTES / UPLOAD_PART_SIZE_BYTES);
+
+/**
+ * Public-demo quotas, per anonymous session.
+ *
+ * This deployment is a portfolio demo with no sign-in, so every request is
+ * ultimately paid for by the owner's OpenAI account. These caps bound what a
+ * single visitor can spend without making the demo feel restricted.
+ */
+export const MAX_DOCUMENTS_PER_SESSION = 10;
+export const MAX_QUESTIONS_PER_SESSION_PER_HOUR = 30;
 
 /** Question input bounds, mirrored by the `questions.question` CHECK constraint. */
 export const MIN_QUESTION_LENGTH = 2;
@@ -65,7 +88,7 @@ export const RAG_DEFAULTS: RagConfig = {
   chunkSize: 1000,
   chunkOverlap: 150,
   topK: 5,
-  similarityThreshold: 0.3,
+  similarityThreshold: 0.45,
   chatModel: 'gpt-4o-mini',
   ocrModel: 'gpt-5-mini',
 };

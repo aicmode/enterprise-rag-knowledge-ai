@@ -43,7 +43,10 @@ describe.runIf(enabled)('OpenAI PDF ingestion integration', () => {
     const chunks = chunkPages(extraction.pages, getRagConfig());
 
     expect(extraction.pages[0]).toMatchObject({ pageNumber: 1, source: 'ocr' });
-    expect(extraction.pages[0].text).toMatch(/最大\s*3\s*日/);
+    // Half- or full-width digit: transcribing 「３」 from a Japanese page is a
+    // correct reading, and `normalizePageText` deliberately preserves full-width
+    // characters rather than folding them, so the assertion accepts both.
+    expect(extraction.pages[0].text).toMatch(/最大\s*[3３]\s*日/);
     expect(chunks[0]?.pageNumber).toBe(1);
 
     const match: MatchedChunk = {
@@ -63,9 +66,9 @@ describe.runIf(enabled)('OpenAI PDF ingestion integration', () => {
     });
     const citations = buildCitations([match]);
 
-    expect(generated.answer).toMatch(/3\s*日/);
+    expect(generated.answer).toMatch(/[3３]\s*日/);
     expect(citations[0]).toMatchObject({ pageNumber: 1 });
-    expect(citations[0].excerpt).toMatch(/最大\s*3\s*日/);
+    expect(citations[0].excerpt).toMatch(/最大\s*[3３]\s*日/);
   }, 120_000);
 
   it('retrieves an English policy semantically from a Japanese question', async () => {
@@ -101,7 +104,7 @@ describe.runIf(enabled)('OpenAI PDF ingestion integration', () => {
     });
     const citations = buildCitations([match]);
 
-    expect(generated.answer).toMatch(/3\s*日/);
+    expect(generated.answer).toMatch(/[3３]\s*日/);
     expect(citations[0]).toMatchObject({ pageNumber: 3 });
   }, 60_000);
 });

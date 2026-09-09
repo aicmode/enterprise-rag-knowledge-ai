@@ -7,43 +7,40 @@ import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
+import { listQuestions } from '@/lib/db/questions';
 import { formatDateTime, truncate } from '@/lib/format';
-import { createServerSupabaseClient } from '@/lib/supabase/server';
-import type { Citation, FeedbackRating } from '@/lib/types';
+import { getSessionId } from '@/lib/session-server';
+import type { FeedbackRating, QuestionSummary } from '@/lib/types';
 
 export const metadata: Metadata = { title: '質問履歴' };
 export const dynamic = 'force-dynamic';
 
-interface HistoryRow {
-  id: string;
-  question: string;
-  answer: string;
-  sources: Citation[];
-  created_at: string;
-  answer_feedback: { rating: FeedbackRating }[];
-}
-
 /**
  * Question history.
  *
- * RLS restricts `questions` to the owner, so this query needs no explicit
- * user filter to be safe -- but the policy is what guarantees it, not the
- * absence of a WHERE clause.
+ * Scoped to the visitor's demo session, so one person's history is never
+ * visible to another even though nobody signs in.
  *
- * Only the fields the list actually renders are selected; the full answer text
- * and every citation body would be a large payload for a screen that shows one
- * line per row.
+ * Only the fields the list actually renders are selected; the full citation
+ * payload would be large for a screen that shows one line per row, so it is
+ * reduced to a count in SQL.
  */
 export default async function HistoryPage() {
-  const supabase = await createServerSupabaseClient();
+  const sessionId = await getSessionId();
 
-  const { data, error } = await supabase
-    .from('questions')
-    .select('id, question, answer, sources, created_at, answer_feedback(rating)')
-    .order('created_at', { ascending: false })
-    .limit(100);
+  let rows: QuestionSummary[] = [];
+  let failed = false;
 
-  if (error) {
+  if (sessionId) {
+    try {
+      rows = await listQuestions(sessionId);
+    } catch (error) {
+      console.error('[history] failed to load question history', error);
+      failed = true;
+    }
+  }
+
+  if (failed) {
     return (
       <div className="space-y-6">
         <PageHeader title="質問履歴" />
@@ -51,8 +48,6 @@ export default async function HistoryPage() {
       </div>
     );
   }
-
-  const rows = (data ?? []) as HistoryRow[];
 
   return (
     <div className="space-y-6">
@@ -76,8 +71,8 @@ export default async function HistoryPage() {
         ) : (
           <ul className="divide-y divide-border-subtle">
             {rows.map((row) => {
-              const rating = row.answer_feedback?.[0]?.rating ?? null;
-              const sourceCount = Array.isArray(row.sources) ? row.sources.length : 0;
+              const rating = row.rating;
+              const sourceCount = row.source_count;
 
               return (
                 <li key={row.id}>

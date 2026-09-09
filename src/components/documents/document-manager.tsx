@@ -19,19 +19,22 @@ import { StatusBadge } from '@/components/ui/status-badge';
 import { MAX_FILE_SIZE_BYTES, MAX_PAGE_COUNT } from '@/lib/config/rag';
 import { cn } from '@/lib/cn';
 import { formatBytes, formatDateTime } from '@/lib/format';
-import { createClient } from '@/lib/supabase/client';
 import type { DocumentRow } from '@/lib/types';
-import { uploadPdfWithProgress } from '@/lib/upload';
-import { buildStoragePath, deriveTitle, validatePdfFile } from '@/lib/validation/document';
+import { UploadError, uploadPdfWithProgress } from '@/lib/upload';
+import { deriveTitle, validatePdfFile } from '@/lib/validation/document';
 
-type UploadPhase = 'idle' | 'uploading' | 'registering' | 'processing';
+type UploadPhase = 'idle' | 'registering' | 'uploading' | 'processing';
 
 /**
  * The documents screen.
  *
  * Owns the whole upload lifecycle:
  *
- *   validate -> Storage (direct, with progress) -> register row -> process
+ *   validate -> register row -> upload the PDF in parts -> process
+ *
+ * Registration comes before the bytes so the per-session quota is checked
+ * before a 10 MB transfer starts, and so the upload parts have a row to attach
+ * to.
  *
  * Each stage is reported separately, because "uploading" and "analysing" have
  * very different durations and a single spinner for both makes a 100-page PDF
@@ -78,33 +81,11 @@ export function DocumentManager({ initialDocuments }: { initialDocuments: Docume
       return;
     }
 
-    const supabase = createClient();
+    // The document id is generated here so the upload parts can be addressed
+    // before the server has replied with anything.
+    const documentId = crypto.randomUUID();
 
     try {
-      const {
-        data: { user },
-        error: userError,
-      } = await supabase.auth.getUser();
-
-      if (userError || !user) {
-        setError('セッションの有効期限が切れました。再度ログインしてください。');
-        router.replace('/login');
-        return;
-      }
-
-      // The document id is generated here so the Storage path and the DB row
-      // agree without a server round-trip before the upload starts.
-      const documentId = crypto.randomUUID();
-      const storagePath = buildStoragePath(user.id, documentId, file.name);
-
-      setPhase('uploading');
-      await uploadPdfWithProgress({
-        supabase,
-        storagePath,
-        file,
-        onProgress: (p) => setProgress(p.percent),
-      });
-
       setPhase('registering');
       const registerResponse = await fetch('/api/documents/register', {
         method: 'POST',
@@ -113,7 +94,6 @@ export function DocumentManager({ initialDocuments }: { initialDocuments: Docume
           documentId,
           title: deriveTitle(file.name),
           fileName: file.name,
-          storagePath,
           fileSize: file.size,
         }),
       });
@@ -123,6 +103,13 @@ export function DocumentManager({ initialDocuments }: { initialDocuments: Docume
         setError(body?.error?.message ?? '資料の登録に失敗しました。もう一度お試しください。');
         return;
       }
+
+      setPhase('uploading');
+      await uploadPdfWithProgress({
+        documentId,
+        file,
+        onProgress: (p) => setProgress(p.percent),
+      });
 
       setPhase('processing');
       refresh();
@@ -142,8 +129,12 @@ export function DocumentManager({ initialDocuments }: { initialDocuments: Docume
       }
 
       setNotice(`「${deriveTitle(file.name)}」を登録しました。質問できる状態です。`);
-    } catch {
-      setError('アップロードに失敗しました。ネットワーク環境を確認してもう一度お試しください。');
+    } catch (uploadError) {
+      setError(
+        uploadError instanceof UploadError && uploadError.status
+          ? uploadError.message
+          : 'アップロードに失敗しました。ネットワーク環境を確認してもう一度お試しください。',
+      );
     } finally {
       setPhase('idle');
       setProgress(0);
@@ -230,8 +221,8 @@ export function DocumentManager({ initialDocuments }: { initialDocuments: Docume
   }
 
   const phaseLabel: Record<Exclude<UploadPhase, 'idle'>, string> = {
-    uploading: `アップロード中... ${progress}%`,
     registering: '登録中...',
+    uploading: `アップロード中... ${progress}%`,
     processing: 'テキスト解析・必要ページのOCR・ベクトル化中...',
   };
 

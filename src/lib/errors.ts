@@ -9,11 +9,15 @@
  * Nothing derived from an internal exception (message, stack, driver detail,
  * SQL) is ever placed in an HTTP response body. `toErrorResponse` is the single
  * choke point that enforces this.
+ *
+ * There is no `unauthorized` / `forbidden` pair here: this deployment is a
+ * public demo with no accounts, so nothing can be refused for lack of a login.
+ * A resource belonging to another demo session is reported as `not_found`,
+ * which is both true from the caller's perspective and does not confirm that
+ * the id exists.
  */
 
 export type AppErrorCode =
-  | 'unauthorized'
-  | 'forbidden'
   | 'not_found'
   | 'validation_failed'
   | 'invalid_file_type'
@@ -23,18 +27,18 @@ export type AppErrorCode =
   | 'pdf_no_text'
   | 'ocr_failed'
   | 'ocr_timeout'
-  | 'storage_failed'
+  | 'upload_incomplete'
   | 'database_failed'
   | 'embedding_failed'
   | 'retrieval_failed'
   | 'answer_failed'
   | 'rate_limited'
+  | 'quota_exceeded'
+  | 'session_unavailable'
   | 'already_processing'
   | 'internal_error';
 
 const USER_MESSAGES: Record<AppErrorCode, string> = {
-  unauthorized: 'ログインが必要です。再度ログインしてください。',
-  forbidden: 'この操作を行う権限がありません。',
   not_found: '対象のデータが見つかりませんでした。',
   validation_failed: '入力内容を確認してください。',
   invalid_file_type: 'PDFファイルのみアップロードできます。',
@@ -44,19 +48,19 @@ const USER_MESSAGES: Record<AppErrorCode, string> = {
   pdf_no_text: 'このPDFから読み取り可能なテキストを取得できませんでした。画像が不鮮明な場合は、より高品質なPDFでお試しください。',
   ocr_failed: 'PDFの画像文字解析に失敗しました。時間をおいて再度お試しください。',
   ocr_timeout: 'PDFの画像文字解析がタイムアウトしました。ページ数を減らして再度お試しください。',
-  storage_failed: 'ファイルの保存・取得に失敗しました。もう一度お試しください。',
+  upload_incomplete: 'アップロードが完了していません。もう一度アップロードしてください。',
   database_failed: 'データの保存に失敗しました。もう一度お試しください。',
   embedding_failed: '資料の解析に失敗しました。もう一度お試しください。',
   retrieval_failed: '資料の検索に失敗しました。もう一度お試しください。',
   answer_failed: '回答の生成に失敗しました。もう一度お試しください。',
-  rate_limited: 'リクエストが集中しています。しばらく待ってからお試しください。',
+  rate_limited: 'このデモでは1時間あたりの質問数に上限があります。しばらく待ってからお試しください。',
+  quota_exceeded: 'このデモで登録できる資料数の上限に達しました。不要な資料を削除してからお試しください。',
+  session_unavailable: 'デモセッションを開始できませんでした。ページを再読み込みしてください。',
   already_processing: 'この資料は現在処理中です。完了までお待ちください。',
   internal_error: '予期しないエラーが発生しました。もう一度お試しください。',
 };
 
 const STATUS_BY_CODE: Record<AppErrorCode, number> = {
-  unauthorized: 401,
-  forbidden: 403,
   not_found: 404,
   validation_failed: 400,
   invalid_file_type: 400,
@@ -66,12 +70,14 @@ const STATUS_BY_CODE: Record<AppErrorCode, number> = {
   pdf_no_text: 422,
   ocr_failed: 502,
   ocr_timeout: 504,
-  storage_failed: 502,
+  upload_incomplete: 400,
   database_failed: 500,
   embedding_failed: 502,
   retrieval_failed: 500,
   answer_failed: 502,
   rate_limited: 429,
+  quota_exceeded: 429,
+  session_unavailable: 400,
   already_processing: 409,
   internal_error: 500,
 };

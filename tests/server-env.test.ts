@@ -4,21 +4,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 /**
  * Server environment validation.
  *
- * The point of these tests is the *split*: Supabase configuration and OpenAI
+ * The point of these tests is the *split*: database configuration and OpenAI
  * configuration are validated independently. An integration run against a real
- * Supabase instance with no `OPENAI_API_KEY` showed why it matters -- deleting
- * a document (`createAdminClient` -> `getServerEnv`) and asking a question with
- * no documents registered (`getRagConfig` -> `getServerEnv`) both returned a
+ * database with no `OPENAI_API_KEY` showed why it matters -- deleting a
+ * document and asking a question with no documents registered both returned a
  * 500, even though neither operation calls OpenAI.
  *
  * The module caches after its first successful parse, so every test resets the
  * module registry and re-imports.
  */
 
-const SUPABASE_VARS = {
-  NEXT_PUBLIC_SUPABASE_URL: 'https://project.supabase.co',
-  NEXT_PUBLIC_SUPABASE_ANON_KEY: 'anon-key',
-  SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+const DATABASE_VARS = {
+  DATABASE_URL: 'postgresql://user:pass@db.example.com/ragdb',
 };
 
 const ORIGINAL = { ...process.env };
@@ -30,10 +27,11 @@ async function loadEnvModule() {
 
 beforeEach(() => {
   for (const key of [
-    ...Object.keys(SUPABASE_VARS),
+    ...Object.keys(DATABASE_VARS),
     'OPENAI_API_KEY',
     'OPENAI_CHAT_MODEL',
     'OPENAI_OCR_MODEL',
+    'RAG_TOP_K',
   ]) {
     delete process.env[key];
   }
@@ -44,18 +42,17 @@ afterEach(() => {
 });
 
 describe('getServerEnv', () => {
-  it('resolves Supabase configuration without an OpenAI key present', async () => {
-    Object.assign(process.env, SUPABASE_VARS);
+  it('resolves the database configuration without an OpenAI key present', async () => {
+    Object.assign(process.env, DATABASE_VARS);
 
-    const { getServerEnv } = await loadEnvModule();
-    const env = getServerEnv();
+    const { getServerEnv, getDatabaseUrl } = await loadEnvModule();
 
-    expect(env.NEXT_PUBLIC_SUPABASE_URL).toBe(SUPABASE_VARS.NEXT_PUBLIC_SUPABASE_URL);
-    expect(env.SUPABASE_SERVICE_ROLE_KEY).toBe(SUPABASE_VARS.SUPABASE_SERVICE_ROLE_KEY);
+    expect(getServerEnv().DATABASE_URL).toBe(DATABASE_VARS.DATABASE_URL);
+    expect(getDatabaseUrl()).toBe(DATABASE_VARS.DATABASE_URL);
   });
 
   it('still resolves RAG tuning without an OpenAI key present', async () => {
-    Object.assign(process.env, SUPABASE_VARS, {
+    Object.assign(process.env, DATABASE_VARS, {
       RAG_TOP_K: '7',
       OPENAI_OCR_MODEL: 'gpt-5-mini-test',
     });
@@ -66,30 +63,32 @@ describe('getServerEnv', () => {
     expect(getRagConfig().ocrModel).toBe('gpt-5-mini-test');
   });
 
-  it('names the missing Supabase variables and never their values', async () => {
-    Object.assign(process.env, {
-      NEXT_PUBLIC_SUPABASE_URL: SUPABASE_VARS.NEXT_PUBLIC_SUPABASE_URL,
-      NEXT_PUBLIC_SUPABASE_ANON_KEY: 'anon-key-value',
-    });
-
+  it('names the missing variable and never its value', async () => {
     const { getServerEnv } = await loadEnvModule();
 
-    expect(() => getServerEnv()).toThrow(/SUPABASE_SERVICE_ROLE_KEY/);
-    expect(() => getServerEnv()).not.toThrow(/anon-key-value/);
+    expect(() => getServerEnv()).toThrow(/DATABASE_URL/);
   });
 
-  it('rejects a Supabase URL that is not a URL', async () => {
-    Object.assign(process.env, SUPABASE_VARS, { NEXT_PUBLIC_SUPABASE_URL: 'not-a-url' });
+  it('rejects a connection string that is not a postgres URL', async () => {
+    process.env.DATABASE_URL = 'mysql://user:pass@db.example.com/ragdb';
 
     const { getServerEnv } = await loadEnvModule();
 
-    expect(() => getServerEnv()).toThrow(/NEXT_PUBLIC_SUPABASE_URL/);
+    expect(() => getServerEnv()).toThrow(/DATABASE_URL/);
+  });
+
+  it('accepts both postgres:// and postgresql:// schemes', async () => {
+    process.env.DATABASE_URL = 'postgres://user:pass@db.example.com/ragdb';
+
+    const { getDatabaseUrl } = await loadEnvModule();
+
+    expect(getDatabaseUrl()).toBe('postgres://user:pass@db.example.com/ragdb');
   });
 });
 
 describe('getOpenAIApiKey', () => {
   it('returns the key when it is configured', async () => {
-    Object.assign(process.env, SUPABASE_VARS, { OPENAI_API_KEY: 'openai-key' });
+    Object.assign(process.env, DATABASE_VARS, { OPENAI_API_KEY: 'openai-key' });
 
     const { getOpenAIApiKey } = await loadEnvModule();
 
@@ -97,19 +96,19 @@ describe('getOpenAIApiKey', () => {
   });
 
   it('throws naming OPENAI_API_KEY when it is missing', async () => {
-    Object.assign(process.env, SUPABASE_VARS);
+    Object.assign(process.env, DATABASE_VARS);
 
     const { getOpenAIApiKey } = await loadEnvModule();
 
     expect(() => getOpenAIApiKey()).toThrow(/OPENAI_API_KEY/);
   });
 
-  it('is independent of Supabase configuration', async () => {
+  it('is independent of the database configuration', async () => {
     process.env.OPENAI_API_KEY = 'openai-key';
 
     const { getOpenAIApiKey, getServerEnv } = await loadEnvModule();
 
     expect(getOpenAIApiKey()).toBe('openai-key');
-    expect(() => getServerEnv()).toThrow(/NEXT_PUBLIC_SUPABASE_URL/);
+    expect(() => getServerEnv()).toThrow(/DATABASE_URL/);
   });
 });
