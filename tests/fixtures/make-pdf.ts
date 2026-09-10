@@ -205,3 +205,75 @@ export function buildPasswordProtectedPdf(): Uint8Array {
 
   return assemblePdf(objects, `/Encrypt 6 0 R/ID[<${fileId}><${fileId}>]`);
 }
+
+/**
+ * Encode Japanese text as Shift-JIS.
+ *
+ * Node ships a Shift-JIS *decoder* only, so the reverse table is derived from it
+ * once: every two-byte sequence in the lead/trail ranges is decoded and indexed
+ * by the character it produces.
+ */
+function encodeShiftJis(text: string): Buffer {
+  const decoder = new TextDecoder('shift_jis', { fatal: true });
+  const table = new Map<string, [number, number]>();
+
+  for (let lead = 0x81; lead <= 0xef; lead += 1) {
+    if (lead >= 0xa0 && lead <= 0xdf) continue; // half-width katakana, single byte
+    for (let trail = 0x40; trail <= 0xfc; trail += 1) {
+      if (trail === 0x7f) continue;
+      try {
+        const char = decoder.decode(Uint8Array.from([lead, trail]));
+        if (char.length === 1 && !table.has(char)) table.set(char, [lead, trail]);
+      } catch {
+        // Unassigned code point; nothing to map.
+      }
+    }
+  }
+
+  const bytes: number[] = [];
+  for (const char of text) {
+    const pair = table.get(char);
+    if (!pair) throw new Error(`Not representable in Shift-JIS: ${char}`);
+    bytes.push(...pair);
+  }
+
+  return Buffer.from(bytes);
+}
+
+/**
+ * Japanese PDF that relies on a *predefined* CMap (`90ms-RKSJ-H`) rather than an
+ * embedded one.
+ *
+ * This is the common shape for real-world Japanese PDFs, and the only fixture
+ * that forces pdf.js to load a `.bcmap` from the packaged `cmaps` directory --
+ * which is what makes it the regression guard for the `cMapUrl` prefix handed
+ * to pdf.js in `src/lib/rag/pdf.ts`.
+ */
+export function buildPredefinedCMapJapanesePdf(text: string): Uint8Array {
+  const content = Buffer.from(
+    `BT /F1 14 Tf 72 700 Td <${encodeShiftJis(text).toString('hex')}> Tj ET`,
+    'binary',
+  );
+  const objects = new Map<number, PdfObject>([
+    [1, '<</Type/Catalog/Pages 2 0 R>>'],
+    [2, '<</Type/Pages/Kids[3 0 R]/Count 1>>'],
+    [
+      3,
+      '<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R' +
+        '/Resources<</Font<</F1 5 0 R>>>>>>',
+    ],
+    [4, streamObject('', content)],
+    [
+      5,
+      '<</Type/Font/Subtype/Type0/BaseFont/KozMinPr6N-Regular/Encoding/90ms-RKSJ-H' +
+        '/DescendantFonts[6 0 R]>>',
+    ],
+    [
+      6,
+      '<</Type/Font/Subtype/CIDFontType0/BaseFont/KozMinPr6N-Regular' +
+        '/CIDSystemInfo<</Registry(Adobe)/Ordering(Japan1)/Supplement 6>>/DW 1000>>',
+    ],
+  ]);
+
+  return assemblePdf(objects);
+}

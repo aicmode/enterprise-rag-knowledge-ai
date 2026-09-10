@@ -11,12 +11,22 @@ const nextConfig: NextConfig = {
    */
   serverExternalPackages: ['pdfjs-dist', '@napi-rs/canvas'],
 
-  // PDF.js loads these by URL at runtime rather than through an import, so the
-  // serverless file tracer needs an explicit include for the processing route.
+  /**
+   * PDF.js reaches for these at runtime rather than through a static import, so
+   * the serverless file tracer cannot see them and needs an explicit include.
+   *
+   * The worker is the one that broke Preview: pdf.js loads it through a
+   * computed specifier, which no static analysis can follow, so it was left out
+   * of the function bundle and parsing died with "Setting up fake worker
+   * failed". `src/lib/rag/pdf.ts` now imports it under a literal specifier as
+   * well; this include is what guarantees the file is there either way.
+   */
   outputFileTracingIncludes: {
     '/api/documents/process': [
+      './node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs',
       './node_modules/pdfjs-dist/cmaps/**/*',
       './node_modules/pdfjs-dist/standard_fonts/**/*',
+      './node_modules/pdfjs-dist/wasm/**/*',
     ],
   },
 

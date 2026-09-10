@@ -1,7 +1,6 @@
 import 'server-only';
 
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import type { PDFPageProxy } from 'pdfjs-dist/types/src/display/api';
 
 import {
@@ -148,12 +147,49 @@ export function evaluatePageText(rawText: string): { text: string; quality: Page
   };
 }
 
-function pdfJsAssetUrl(directory: 'cmaps' | 'standard_fonts'): string {
+/**
+ * Run the pdf.js worker module in this process instead of resolving it by path.
+ *
+ * pdf.js does all parsing in a worker. Node has no Web Worker, so the library
+ * falls back to loading the worker module in-process, and to find it it
+ * dynamic-imports `GlobalWorkerOptions.workerSrc` -- a *computed* specifier it
+ * defaults to the relative `"./pdf.worker.mjs"`. A computed specifier is
+ * invisible to bundlers and to the Vercel file tracer, so `pdf.worker.mjs` was
+ * never copied into the serverless function: locally the whole of node_modules
+ * is on disk and the relative import resolves, on Vercel it failed with
+ * `Cannot find module '/var/task/node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs'`.
+ *
+ * `globalThis.pdfjsWorker` is the hook pdf.js checks *before* it touches
+ * `workerSrc`, so publishing the module here means no worker path is ever
+ * resolved at runtime -- and the static specifier below is one the tracer can
+ * follow. It must be installed before the first `getDocument()` call, because
+ * pdf.js memoizes the lookup on first use.
+ */
+let workerInstallation: Promise<void> | null = null;
+
+function installPdfJsWorker(): Promise<void> {
+  workerInstallation ??= import('pdfjs-dist/legacy/build/pdf.worker.mjs').then(
+    (worker) => {
+      (globalThis as { pdfjsWorker?: unknown }).pdfjsWorker ??= worker;
+    },
+    (error: unknown) => {
+      // Don't cache the failure: the retry button must get a real second try.
+      workerInstallation = null;
+      throw error;
+    },
+  );
+  return workerInstallation;
+}
+
+function pdfJsAssetPath(directory: 'cmaps' | 'standard_fonts' | 'wasm'): string {
+  // pdf.js appends a file name to this prefix and, on Node, hands the result
+  // straight to `fs.readFile`, which does not accept a `file://` URL string --
+  // it must be a plain filesystem path ending in a separator.
+  //
   // `require.resolve()` is rewritten to a numeric module id by webpack when
   // used in route code. `process.cwd()` remains the deployment root on Vercel,
   // and next.config explicitly traces these package assets into the function.
-  const assetDirectory = path.join(process.cwd(), 'node_modules', 'pdfjs-dist', directory, path.sep);
-  return pathToFileURL(assetDirectory).href;
+  return `${path.join(process.cwd(), 'node_modules', 'pdfjs-dist', directory)}/`;
 }
 
 /** Render only an OCR-target page and cap dimensions before paying image-token cost. */
@@ -203,11 +239,18 @@ export async function extractPdfPages(
   let loadingTask: ReturnType<typeof pdfjs.getDocument> | null = null;
 
   try {
+    // Inside the try so that a failure to load the worker is reported as a PDF
+    // parse failure with its technical cause intact, rather than escaping raw.
+    await installPdfJsWorker();
+
     loadingTask = pdfjs.getDocument({
       data,
-      cMapUrl: pdfJsAssetUrl('cmaps'),
+      cMapUrl: pdfJsAssetPath('cmaps'),
       cMapPacked: true,
-      standardFontDataUrl: pdfJsAssetUrl('standard_fonts'),
+      standardFontDataUrl: pdfJsAssetPath('standard_fonts'),
+      // Scanned pages are routinely JBIG2- or JPEG2000-compressed, which pdf.js
+      // decodes with the WebAssembly modules shipped in the package.
+      wasmUrl: pdfJsAssetPath('wasm'),
       useSystemFonts: false,
       useWorkerFetch: false,
       disableFontFace: true,
