@@ -3,6 +3,8 @@ import { NextResponse } from 'next/server';
 import { errorJson, okJson, readJson } from '@/lib/api';
 import { questionExists, upsertFeedback } from '@/lib/db/questions';
 import { AppError } from '@/lib/errors';
+import { resolveClientKey } from '@/lib/security/client-key';
+import { consumeDemoQuota } from '@/lib/security/rate-limit';
 import { requireSessionId } from '@/lib/session-server';
 import { feedbackSchema } from '@/lib/validation/question';
 
@@ -22,6 +24,10 @@ export const runtime = 'nodejs';
 export async function POST(request: Request): Promise<NextResponse> {
   try {
     const sessionId = await requireSessionId();
+
+    // No OpenAI cost here, but it is an unauthenticated write endpoint on a
+    // public URL, so the write rate is bounded like every other one.
+    await consumeDemoQuota(resolveClientKey(request), 'feedback');
 
     const parsed = feedbackSchema.safeParse(await readJson(request));
     if (!parsed.success) {

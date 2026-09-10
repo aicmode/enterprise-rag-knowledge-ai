@@ -11,6 +11,9 @@ import { generateAnswer } from '@/lib/rag/answer';
 import { buildCitations } from '@/lib/rag/citations';
 import { embedQuery } from '@/lib/rag/embedding';
 import { NO_CONTEXT_ANSWER } from '@/lib/rag/prompt';
+import { resolveClientKey } from '@/lib/security/client-key';
+import { consumeDemoQuota } from '@/lib/security/rate-limit';
+import { maybeSweepDemoRetention } from '@/lib/security/retention';
 import { requireSessionId } from '@/lib/session-server';
 import type { AskSuccessResponse } from '@/lib/types';
 import { askRequestSchema } from '@/lib/validation/question';
@@ -26,7 +29,14 @@ export const maxDuration = 60;
  *
  * Retrieval is confined to the calling session's own `ready` documents by the
  * session id that `match_document_chunks` takes as its first argument, and that
- * id comes from the httpOnly cookie rather than from anything the caller sent.
+ * id comes from the demo-session cookie rather than from anything the caller
+ * sent.
+ *
+ * Cost guard: this endpoint spends the owner's OpenAI budget twice per call
+ * (one embedding, one chat completion), so the `ask` quota is consumed *before*
+ * either request is built. The quota is keyed on the client fingerprint rather
+ * than on the session, because a session id is a cookie the caller can throw
+ * away; see `src/lib/security/rate-limit.ts`.
  */
 export async function POST(request: Request): Promise<NextResponse> {
   const startedAt = Date.now();
@@ -45,15 +55,6 @@ export async function POST(request: Request): Promise<NextResponse> {
     const question = parsed.data.question;
     const config = getRagConfig();
 
-    // Public demo: every answer costs the owner an embedding call plus a chat
-    // completion, so a single visitor's hourly volume is capped.
-    const recentQuestions = await countRecentQuestions(sessionId);
-    if (recentQuestions >= MAX_QUESTIONS_PER_SESSION_PER_HOUR) {
-      throw new AppError('rate_limited', {
-        detail: `${recentQuestions} questions in the last hour`,
-      });
-    }
-
     // Distinguish "you have no documents" from "nothing matched" so the UI can
     // point the visitor at the right next action.
     const readyDocuments = await countReadyDocuments(sessionId);
@@ -68,6 +69,31 @@ export async function POST(request: Request): Promise<NextResponse> {
         responseTimeMs: Date.now() - startedAt,
         noRelevantContext: true,
         noDocuments: true,
+      });
+    }
+
+    // --- Cost guard --------------------------------------------------------
+    // Everything below this line spends the owner's OpenAI budget, so the
+    // quotas are consumed here: after the free "you have no documents" path,
+    // and before the first request is built.
+    //
+    // `ask` is keyed on the client fingerprint, so clearing the cookie or
+    // pressing "reset" does not reset it, and it is consumed with a single
+    // atomic statement so a burst of parallel requests cannot all pass the
+    // same check.
+    const clientKey = resolveClientKey(request);
+    await consumeDemoQuota(clientKey, 'ask');
+    maybeSweepDemoRetention();
+
+    // Session-scoped cap, kept as a second, per-visitor bound. On its own it
+    // would be bypassed by a new cookie, which is exactly what the quota above
+    // is there to prevent.
+    const recentQuestions = await countRecentQuestions(sessionId);
+    if (recentQuestions >= MAX_QUESTIONS_PER_SESSION_PER_HOUR) {
+      throw new AppError('rate_limited', {
+        detail: `${recentQuestions} questions in the last hour`,
+        userMessage:
+          '公開デモのため、1時間あたりの質問数に上限があります。しばらく時間をおいてからお試しください。',
       });
     }
 

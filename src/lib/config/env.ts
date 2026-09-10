@@ -1,5 +1,7 @@
 import 'server-only';
 
+import { randomBytes } from 'node:crypto';
+
 import { z } from 'zod';
 
 import { resolveRagConfig, type RagConfig } from './rag';
@@ -48,6 +50,7 @@ export type ServerEnv = z.infer<typeof databaseEnvSchema> & { rag: RagConfig };
 
 let cached: ServerEnv | null = null;
 let cachedOpenAIKey: string | null = null;
+let cachedRateLimitSecret: string | null = null;
 
 /** Report a configuration problem by variable name, never by value. */
 function configError(issues: { path: PropertyKey[] }[]): Error {
@@ -107,6 +110,61 @@ export function getOpenAIApiKey(): string {
 
   cachedOpenAIKey = parsed.data.OPENAI_API_KEY;
   return cachedOpenAIKey;
+}
+
+/**
+ * Secret keying the anonymous client fingerprint used by the demo rate limits.
+ *
+ * Why a secret at all: the fingerprint is derived from the visitor's IP, and an
+ * unkeyed `sha256(ip)` is not anonymous -- the entire IPv4 space is 2^32
+ * hashes, so anyone holding the table could enumerate it and recover every
+ * address. An HMAC under a key that never leaves the server cannot be reversed
+ * that way.
+ *
+ * When the variable is absent the process falls back to a random per-instance
+ * secret. That keeps `npm run dev`, `next build` and the test suite working
+ * with no configuration, and it still produces working limits -- they simply do
+ * not survive a restart or span two serverless instances. Production is warned
+ * about it loudly rather than silently downgraded, and the warning names the
+ * variable, never a value.
+ */
+export function getDemoRateLimitSecret(): string {
+  if (cachedRateLimitSecret) return cachedRateLimitSecret;
+
+  const configured = process.env.DEMO_RATE_LIMIT_SECRET?.trim();
+
+  if (configured && configured.length >= 16) {
+    cachedRateLimitSecret = configured;
+    return cachedRateLimitSecret;
+  }
+
+  console.warn(
+    configured
+      ? '[config] DEMO_RATE_LIMIT_SECRET is too short (min 16 chars); using an ephemeral per-instance secret. Demo rate limits will not persist across restarts.'
+      : '[config] DEMO_RATE_LIMIT_SECRET is not set; using an ephemeral per-instance secret. Demo rate limits will not persist across restarts.',
+  );
+
+  cachedRateLimitSecret = randomBytes(32).toString('hex');
+  return cachedRateLimitSecret;
+}
+
+/**
+ * Whether forwarded client-IP headers may be believed.
+ *
+ * `x-forwarded-for` is an ordinary request header. Trusting it on a host that
+ * does not overwrite it would make every IP-based limit *worse* than having
+ * none, because a fresh value on each request would look like a fresh client.
+ *
+ * So it is trusted only where something upstream is known to rewrite it:
+ * Vercel (which sets `VERCEL=1` in every runtime and terminates the connection
+ * at its edge), or an operator who has explicitly said so with
+ * `DEMO_TRUST_PROXY_HEADERS=1` because they run behind their own proxy.
+ */
+export function trustsProxyHeaders(): boolean {
+  const override = process.env.DEMO_TRUST_PROXY_HEADERS?.trim();
+  if (override === '1' || override === 'true') return true;
+  if (override === '0' || override === 'false') return false;
+  return process.env.VERCEL === '1';
 }
 
 /** RAG tuning as resolved from the environment. */

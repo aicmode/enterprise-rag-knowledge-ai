@@ -294,6 +294,11 @@ export function DocumentManager({ initialDocuments }: { initialDocuments: Docume
                 <p className="mt-1 text-xs text-ink-faint">
                   スキャンPDFや日本語・英語混在PDFも自動解析します
                 </p>
+                {/* Say the quota exists before the visitor hits it, rather than
+                    letting a 429 be the first they hear of it. */}
+                <p className="mt-1 text-xs text-ink-faint">
+                  公開デモのため、登録できる資料数と解析回数には上限があります
+                </p>
               </>
             )}
 

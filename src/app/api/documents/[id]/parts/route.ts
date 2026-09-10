@@ -5,6 +5,8 @@ import { MAX_FILE_SIZE_BYTES, UPLOAD_PART_SIZE_BYTES } from '@/lib/config/rag';
 import { getDocument } from '@/lib/db/documents';
 import { getStagedByteLength, saveUploadPart } from '@/lib/db/uploads';
 import { AppError } from '@/lib/errors';
+import { resolveClientKey } from '@/lib/security/client-key';
+import { consumeDemoQuota } from '@/lib/security/rate-limit';
 import { requireSessionId } from '@/lib/session-server';
 import { uploadPartSchema } from '@/lib/validation/document';
 
@@ -27,6 +29,13 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * must be in range, the part must not exceed the part size, and the running
  * total must not exceed the overall file limit -- so a caller cannot assemble
  * a 1 GB file out of legal-looking 3 MB pieces.
+ *
+ * Those guards are all *per document*, though, and registering another document
+ * is cheap. The `upload_bytes` quota adds the missing per-client bound: it is
+ * counted in bytes rather than in requests, so neither many small parts nor many
+ * separate documents can push more `bytea` into a free-tier database than the
+ * daily budget allows -- including uploads that are abandoned before processing
+ * and therefore never reach the "delete the staged bytes" step.
  */
 export async function POST(
   request: Request,
@@ -71,6 +80,10 @@ export async function POST(
         detail: `staged total would be ${alreadyStaged + body.byteLength} bytes`,
       });
     }
+
+    // Charged for the bytes actually accepted, after the per-document checks
+    // above and immediately before they are written.
+    await consumeDemoQuota(resolveClientKey(request), 'upload_bytes', body.byteLength);
 
     await saveUploadPart(id, parsed.data.partIndex, body);
 

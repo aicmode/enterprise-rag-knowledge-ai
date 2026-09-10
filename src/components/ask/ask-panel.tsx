@@ -149,7 +149,8 @@ export function AskPanel({ hasReadyDocuments }: { hasReadyDocuments: boolean }) 
 
             <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
               <p id="question-hint" className="text-xs text-ink-faint">
-                Cmd / Ctrl + Enter で送信 ・ 残り {remaining} 文字
+                Cmd / Ctrl + Enter で送信 ・ 残り {remaining} 文字 ・
+                公開デモのため質問数に上限があります
               </p>
 
               <Button type="submit" disabled={isLoading || question.trim().length === 0}>

@@ -68,8 +68,9 @@ RAG は「それらしい回答」を作るだけなら簡単ですが、**業�
 
 ### 公開デモセッション
 - 登録・ログイン不要。公開 URL を開いた時点で利用可能
-- httpOnly Cookie による匿名セッション（訪問者ごとに資料と履歴を分離）
+- 匿名セッション Cookie（v4 UUID）で訪問者ごとに資料と履歴を分離
 - 「デモデータをリセット」で自分の資料・履歴を削除し、新しいセッションを開始
+- 利用回数・OpenAI コストの上限は Cookie ではなく匿名クライアント指紋で管理（リセットしても上限は戻りません）
 
 ### ダッシュボード
 - 登録資料数 / 解析完了数 / 累計質問数 / Helpful率
@@ -112,6 +113,7 @@ RAG は「それらしい回答」を作るだけなら簡単ですが、**業�
 | ベクトル検索 | pgvector (HNSW / cosine) |
 | ファイル保存 | **なし**（PDF は取り込み中だけ DB にステージングし、完了時に破棄） |
 | セッション | httpOnly Cookie（匿名デモセッション UUID）／認証プロバイダなし |
+| 濫用対策 | Cookie 非依存の匿名クライアント指紋（HMAC-SHA256）＋ PostgreSQL の固定ウィンドウカウンタ |
 | Embedding | OpenAI `text-embedding-3-small` (1536次元) |
 | 回答生成 | OpenAI Chat Completions (`OPENAI_CHAT_MODEL`) |
 | OCR fallback | OpenAI Responses API + Vision (`OPENAI_OCR_MODEL`) |
@@ -178,7 +180,7 @@ graph TB
 db/migrations/               スキーマとベクトル検索関数（正本）
 scripts/
 ├── migrate.mjs              マイグレーション実行（schema_migrations で冪等）
-└── db-cleanup.mjs           デモデータの保持期間クリーンアップ
+└── db-cleanup.mjs           デモデータ・カウンタ・ステージング済みバイト列の保持期間クリーンアップ
 src/
 ├── app/
 │   ├── (app)/               アプリ本体（サイドバー付きシェル）
@@ -213,6 +215,11 @@ src/
 │   │   ├── answer.ts        回答生成
 │   │   ├── citations.ts     出典構築（純粋関数）
 │   │   └── ingest.ts        取り込みパイプライン
+│   ├── security/
+│   │   ├── demo-limits.ts   公開デモの上限表とウィンドウ計算（純粋関数）
+│   │   ├── client-key.ts    匿名クライアント指紋（HMAC、生IPを保存しない）
+│   │   ├── rate-limit.ts    アトミックな消費と期限切れ削除
+│   │   └── retention.ts     期限切れカウンタ・失効バイト列の自動清掃
 │   ├── session.ts           デモセッション ID と Cookie 属性（純粋関数）
 │   ├── session-server.ts    Cookie からのセッション解決（server-only）
 │   ├── upload.ts            ブラウザ側の分割アップロード（進捗付き）
@@ -342,7 +349,18 @@ Vercel の Serverless Function はリクエストボディを **4.5MB** まで�
 ### なぜ認証を無くしたのか、それでどう分離するのか
 本番デプロイの目的が**ポートフォリオの公開デモ**だからです。閲覧者にアカウント作成を求めることは、デモの価値を下げるだけで何も守りません。
 
-一方、分離そのものは必要です。訪問者が他人のアップロードした PDF を読めたり削除できたりしてはいけません。そこで、認証の代わりに **httpOnly Cookie に入れた UUID（デモセッション）**を全行に記録し、すべてのクエリをその ID でスコープしています。`match_document_chunks` はセッション ID を**デフォルト値のない第 1 引数**として受け取るため、呼び出し側が指定を忘れることが構文上できません。
+一方、分離そのものは必要です。訪問者が他人のアップロードした PDF を読めたり削除できたりしてはいけません。そこで、認証の代わりに **Cookie に入れた v4 UUID（デモセッション）**を全行に記録し、すべてのクエリをその ID でスコープしています。`match_document_chunks` はセッション ID を**デフォルト値のない第 1 引数**として受け取るため、呼び出し側が指定を忘れることが構文上できません。
+
+### なぜ利用制限をセッション Cookie で数えないのか
+
+**Cookie は訪問者の持ち物だからです。** デモセッション ID はデータの分離には十分ですが、コストの上限としては機能しません。Cookie を消す・リセットボタンを押す・別のブラウザで開く——どれをしても新しい UUID が発行され、「1セッションあたり N 件」という上限は最初からやり直しになります。ログインの無い公開デモで、OpenAI の請求が全額こちらに来る以上、これは設計上の欠陥です。
+
+そこで、**上限だけをセッションから切り離しました**。回数・容量のカウンタは Cookie ではなく、リクエスト元から導出した**匿名クライアント指紋**に紐づけます。指紋は `HMAC-SHA256(サーバー側シークレット, 正規化済みIP)` で、生 IP は保存しません（詳細は[セキュリティ](#公開デモの濫用対策)）。結果として、
+
+- セッションリセットは**自分のデータを消して初期状態に戻す機能**のまま
+- ただし**利用上限のリセットボタンにはならない**
+
+という、公開デモとして正しい振る舞いになります。
 
 ### なぜ回答をコンテキスト限定にするか
 一般知識で補完してしまうと、**回答本文と出典が食い違います**。「就業規則にこう書いてある」と読める文章の根拠が、実はモデルの事前学習知識だった、という状態は業務利用では致命的です。根拠が無い場合に「確認できませんでした」と答えられることは、機能の欠如ではなく品質保証です。検索結果が 0 件のときは**モデルを呼び出さずに**固定文を返すため、この経路でハルシネーションが起きる余地がありません。
@@ -363,6 +381,7 @@ RAG の品質は「検索が当たっているか」で決まりますが、こ�
 | `document_chunks` | チャンク + Embedding | `vector(1536)`、`(document_id, page_number, chunk_index)` に UNIQUE |
 | `questions` | 質問・回答・出典 | `sources` は JSONB。回答時点のスナップショット |
 | `answer_feedback` | 回答評価 | `(question_id, session_id)` に UNIQUE → 再評価は UPSERT |
+| `demo_rate_limits` | 公開デモの利用カウンタ | `(client_key, bucket, window_start)` が PK。**生 IP は 1 列も持たない**。`expires_at` で TTL |
 
 ### インデックス
 
@@ -373,6 +392,7 @@ RAG の品質は「検索が当たっているか」で決まりますが、こ�
 | `documents_session_status_idx` | `ready` 件数の集計 |
 | `document_chunks_document_id_idx` | 削除・再解析時のチャンク操作 |
 | `questions_session_created_at_idx` | 履歴一覧 |
+| `demo_rate_limits_expires_at_idx` | 期限切れカウンタの一括削除 |
 
 ### ON DELETE の設計
 
@@ -430,17 +450,28 @@ match_document_chunks(
 |---|---|---|
 | `DATABASE_URL` | **サーバーのみ** | PostgreSQL 接続 |
 | `OPENAI_API_KEY` | **サーバーのみ** | OCR / Embedding / 回答生成 |
+| `DEMO_RATE_LIMIT_SECRET` | **サーバーのみ** | 匿名クライアント指紋の HMAC 鍵 |
 
 **このアプリに `NEXT_PUBLIC_*` は 1 つもありません。** ブラウザはデータベースにも OpenAI にも直接アクセスせず、必ず自前の Route Handler を経由します。秘密値を含む `src/lib/config/env.ts` と `src/lib/db/*` は先頭で `import 'server-only'` しているため、Client Component から誤って import すると**ビルドが失敗します**。
 
 ### デモセッションによる分離
 
-認証プロバイダの代わりに、`proxy.ts` が全リクエストで httpOnly Cookie（`rag_demo_session`、v4 UUID、30日）を保証します。
+認証プロバイダの代わりに、`proxy.ts` が全リクエストで Cookie（`rag_demo_session`、v4 UUID、httpOnly、SameSite=Lax、30日）を保証します。分離が成立している理由は次の 2 点です。
 
-- **httpOnly** — ページのスクリプトから読めないため、XSS で他人の ID にすり替えることができない
-- **UUID v4** — 推測不能
-- **全クエリでスコープ** — `src/lib/db/` の関数はすべて `sessionId` を必須引数に取り、`session_id` で絞り込む。セッションを取らないデータアクセス関数は存在しない
+- **UUID v4 の推測困難性** — 122 ビットの乱数であり、他人のセッション ID を当てることは現実的に不可能
+- **全クエリでスコープ** — `src/lib/db/` の関数はすべて `sessionId` を必須引数に取り、`session_id` で絞り込む。セッションを取らないデータアクセス関数は存在しない。`match_document_chunks` もセッション ID をデフォルト値のない第 1 引数として要求する
 - **他セッションのリソースは `not_found`** — 存在の有無を漏らさないため、403 ではなく 404 相当を返す
+
+`httpOnly` / `SameSite=Lax` も付けていますが、これらが担うのは**ブラウザ上の別の脅威**です。
+
+| 属性 | 実際に防いでいること | 防いでいないこと |
+|---|---|---|
+| `httpOnly` | ページ内 JavaScript（XSS を含む）から `document.cookie` で値を読み出されること | Cookie 値そのものの偽造・差し替え。ブラウザ外（`curl` など）から任意の値を送ることは誰でもできる |
+| `SameSite=Lax` | 他サイトからの意図しないクロスサイト送信 | 同上 |
+
+つまり **「httpOnly だから他人の ID にすり替えられない」わけではありません。** すり替えを現実的に不可能にしているのは Cookie の属性ではなく、**UUID v4 の推測困難性**と**全クエリのセッションスコープ**です。逆に言えば、自分の Cookie を消したり書き換えたりすることは訪問者の自由であり、実際に自由にできる前提で設計しています——だからこそ、[利用上限は Cookie とは別の軸で数えています](#公開デモの濫用対策)。
+
+Cookie 値への署名（HMAC）は導入していません。署名が守るのは「サーバーが発行した値であること」ですが、この ID は誰でも新規に発行できるもので、他人の ID を推測する手段も無いため、署名によって新たに防げる攻撃がありません。複雑さだけが増えるため採用していません。
 
 これは認証ではなく、**公開デモにおけるデータ分離**です。README・UI ともにそれ以上のことは主張していません。機密資料を扱う運用に転用する場合は、組織・メンバーシップに基づく認証と RLS の追加が必要です（[既知の制限](#既知の制限)）。
 
@@ -452,15 +483,71 @@ match_document_chunks(
 - 質問: 2〜1000文字（UI・API・DB CHECK の三層で一致）
 - ID: すべての経路で UUID 形式を検証してからクエリへ渡す（バインド変数のみを使用し、SQL 文字列連結は行わない）
 
-### デモの濫用対策
+### 公開デモの濫用対策
+
+公開 URL にログインが無い以上、OpenAI の利用料と DB 容量は**すべてこちら持ち**です。対策は 2 層に分かれています。
+
+#### 1層目：セッション単位（体験のための上限）
 
 | 対策 | 値 | 実装 |
 |---|---|---|
 | 1セッションあたりの資料数 | 10件 | `/api/documents/register` が登録前に確認 |
 | 1セッションあたりの質問数 | 30件 / 時 | `/api/ask` が Embedding 生成前に確認 |
+| 同時解析数 | 2件 / セッション | `claimDocumentForProcessing` が **advisory lock 下で**確認 |
+
+これらは「1人の訪問者が快適に使える範囲」を定めるものです。**コストの上限としては機能しません**——Cookie を消せば新しいセッションになるからです。
+
+#### 2層目：クライアント指紋単位（コストのための上限）
+
+カウンタは Cookie ではなく、リクエスト元から導出した匿名指紋に紐づきます。**Cookie 削除・セッションリセット・新しい UUID の発行では戻りません。**
+
+| バケット | 上限 | 単位 | 課金される直前の処理 |
+|---|---|---|---|
+| `ask` | 30 / 1時間 | 回 | 質問の Embedding + Chat Completion |
+| `document_register` | 15 / 24時間 | 回 | 資料登録（削除→再登録の繰り返しも数える） |
+| `document_process` | 25 / 24時間 | 回 | 解析の開始（**再試行も1回として数える**） |
+| `ocr_page` | 150 / 24時間 | ページ | OpenAI Vision へ送る1ページごと |
+| `embedding_chunk` | 5,000 / 24時間 | チャンク | Embedding バッチ送信の直前 |
+| `upload_bytes` | 40MB / 24時間 | バイト | `bytea` への書き込み直前 |
+| `feedback` | 120 / 1時間 | 回 | 評価の UPSERT |
+| `session_reset` | 20 / 1時間 | 回 | セッションリセット（CASCADE DELETE） |
+
+上限に達した場合は **429 Too Many Requests**（`Retry-After` 付き）を返し、本文には日本語のメッセージとコードだけを載せます。指紋・IP・SQL・スタックトレースは一切返しません。
+
+**クライアント指紋の作り方**（`src/lib/security/client-key.ts`）:
+
+1. **信頼できる場合のみ**転送ヘッダを読む。`VERCEL=1`（Vercel のエッジが `x-forwarded-for` を上書きする環境）、または明示的に `DEMO_TRUST_PROXY_HEADERS=1` を設定した場合だけ。それ以外では**ヘッダを一切信用しません**——任意に偽装できるヘッダを信じることは、上限が無いことより悪い（リクエストごとに別人に見えるため）
+2. アドレスを正規化する。IPv4 はそのまま、**IPv6 は /64 に丸める**（1台の端末が自分のサブネット内でアドレスを変えるだけで上限を回避できないように）。形式不正な値は `null` にして、ゴミヘッダから無限にバケットを作れないようにする
+3. `HMAC-SHA256(DEMO_RATE_LIMIT_SECRET, "rag-demo-client:v1:" + 正規化済みアドレス)` の先頭 128 ビットを `client_key` とする
+
+**生 IP は保存も返却もしません。** 単純な `sha256(ip)` にしないのは、IPv4 の全空間がわずか 2^32 通りで、テーブルを入手した攻撃者が総当たりで復元できてしまうからです。サーバー側にしか無い鍵で HMAC を取れば、この復元は成立しません。ローカル開発など信頼できるヘッダが無い環境では指紋が 1 つに集約されます（**fail closed**）。
+
+#### 競合状態への対処
+
+「件数を数える → 判定する → 処理する」という実装は、同時リクエストでは上限になりません。20本を同時に投げれば全部が同じ件数を読み、全部が判定を通過します。そのため、消費は **1 文のアトミックな UPSERT** で行います。
+
+```sql
+insert into demo_rate_limits as l (client_key, bucket, window_start, used, expires_at)
+values ($1, $2, $3, $4, $5)
+on conflict (client_key, bucket, window_start) do update
+   set used = l.used + excluded.used
+ where l.used + excluded.used <= $6   -- 上限を超えるなら更新しない
+returning used
+```
+
+2本目以降は主キーのインデックス上で1本目のコミットを待ち、**コミット後の値**に対して `WHERE` を評価します。返り行が無い＝上限超過であり、そのとき `used` は増えていません。同時解析数の判定は UPSERT で表現できないため、`pg_advisory_xact_lock(hashtext(session_id))` でセッション単位に直列化しています。
+
+検証は `tests/integration/abuse.integration.test.ts`（実 DB・同時実行あり）で行っています。
+
+#### その他
+
+| 対策 | 値 | 実装 |
+|---|---|---|
 | ファイルサイズ | 10MB | クライアント検証 + 部分ごと + 合計 + DB CHECK |
 | ページ数 | 100ページ | 抽出直後に検証（超過は `failed`） |
-| データ保持 | `npm run db:cleanup -- --days=30` | 古いデモデータを削除（手動 / スケジュール実行） |
+| ステージング済みバイト列の保持 | 24時間（`failed` / `uploaded`） | 期限後は `bytea` のみ削除。資料行・失敗理由・削除操作は残る |
+| データ保持 | `npm run db:cleanup -- --days=30` | 古いデモデータ・期限切れカウンタを削除 |
+| 自動清掃 | 対象APIリクエストの約2% | `src/lib/security/retention.ts`（Next.js `after()` でレスポンス後も完走させ、cron が無い環境でも肥大化を防止） |
 
 ### エラー詳細の非開示
 
@@ -486,10 +573,16 @@ match_document_chunks(
 | 検索失敗 | 資料の検索に失敗しました。 | — |
 | 回答生成失敗 | 回答の生成に失敗しました。 | — |
 | 二重処理 | この資料は現在処理中です。 | 変更しない |
-| 質問レート超過 | 1時間あたりの質問数の上限を案内 | — |
+| 質問レート超過 | 1時間あたりの質問数の上限を案内（429 / `Retry-After`） | — |
+| 資料登録・解析回数の上限 | 24時間あたりの上限を案内（429） | 作成・変更しない |
+| OCR ページ数の上限 | 24時間あたりの OCR ページ数の上限を案内（429） | `failed`（OpenAI は呼ばれない） |
+| Embedding 量の上限 | 24時間あたりの解析量の上限を案内（429） | `failed`（OpenAI は呼ばれない） |
+| アップロード容量の上限 | 24時間あたりの容量の上限を案内（429） | 部分を保存しない |
+| 同時解析数の上限 | 解析中の資料の完了待ちを案内（409） | 変更しない |
+| ステージング期限切れの再試行 | アップロードが完了していません。 | `failed`（再アップロードで復帰） |
 | セッション未確立 | デモセッションを開始できませんでした。 | — |
 
-`failed` の資料は一覧に理由とともに表示され、**再試行**ボタンから再解析できます。再試行時は既存チャンクを削除してから処理するため、チャンクが重複しません。ステージング済みのバイト列は保持されているので、ファイルの再アップロードは不要です。
+`failed` の資料は一覧に理由とともに表示され、**再試行**ボタンから再解析できます。再試行時は既存チャンクを削除してから処理するため、チャンクが重複しません。ステージング済みのバイト列は **24時間**保持されるため、その間はファイルの再アップロードなしで再試行できます。期限を過ぎるとバイト列だけが削除され（資料行と失敗理由は残ります）、再試行は「アップロードが完了していません」を返すので、同じファイルを選び直せば復帰できます。公開デモでは、失敗し続ける資料の `bytea` が無制限に溜まる方が問題だからです。
 
 ---
 
@@ -540,7 +633,7 @@ npm run dev
 | `npm run test` | Vitest |
 | `npm run test:watch` | Vitest（watch） |
 | `npm run db:migrate` | 未適用マイグレーションの適用 |
-| `npm run db:cleanup -- --days=30` | 古いデモデータの削除 |
+| `npm run db:cleanup -- --days=30` | 古いデモデータ・期限切れカウンタ・失効したステージング済みバイト列の削除 |
 
 ---
 
@@ -550,12 +643,18 @@ npm run dev
 |---|---|---|
 | `DATABASE_URL` | ✅ | **秘密**。PostgreSQL 接続文字列。Vercel では Neon の**プール済み**（`-pooler`）を使用 |
 | `OPENAI_API_KEY` | ✅ | **秘密**。サーバー専用 |
+| `DEMO_RATE_LIMIT_SECRET` | ✅（本番） | **秘密**。匿名クライアント指紋の HMAC 鍵。`openssl rand -hex 32` で生成。未設定でも起動はするが、インスタンスごとのランダム値になり再起動で上限が失われる |
+| `DEMO_TRUST_PROXY_HEADERS` | 任意 | `x-forwarded-for` 等を信用するか。未設定なら `VERCEL=1` のときだけ信用する。自前のリバースプロキシ配下でのみ `1` を設定 |
 | `OPENAI_CHAT_MODEL` | 任意 | 既定 `gpt-4o-mini` |
 | `OPENAI_OCR_MODEL` | 任意 | OCR専用。既定 `gpt-5-mini` |
 | `RAG_TOP_K` | 任意 | 既定 `5`（1〜20 にクランプ） |
 | `RAG_SIMILARITY_THRESHOLD` | 任意 | 既定 `0.45`（0〜1 にクランプ） |
 | `RAG_CHUNK_SIZE` | 任意 | 既定 `1000`（200〜4000 にクランプ） |
 | `RAG_CHUNK_OVERLAP` | 任意 | 既定 `150`（チャンクサイズの 1/2 まで） |
+
+> `DEMO_RATE_LIMIT_SECRET` の実値はリポジトリにもこの README にも記載しません。`.env.local` と Vercel の Environment Variables にのみ設定します。
+
+> `DEMO_TRUST_PROXY_HEADERS` を安易に `1` にしないでください。上流が上書きしないヘッダを信用すると、リクエストごとに別のヘッダを送るだけで全ての上限を回避できます（**上限が無いより悪い**状態になります）。
 
 > Embedding モデルは環境変数化していません。`text-embedding-3-small` の 1536 次元が `vector(1536)` と対応しているため、変更は**マイグレーションを伴う設計変更**であり、環境変数で切り替えるべきものではないからです。
 
@@ -592,7 +691,8 @@ DATABASE_URL='<Neon の pooled connection string>' npm run db:migrate
 ```
 >  0001_schema.sql ... ok
 >  0002_match_document_chunks.sql ... ok
-Applied 2 migration(s).
+>  0003_demo_abuse_protection.sql ... ok
+Applied 3 migration(s).
 ```
 
 確認（再実行しても安全です）:
@@ -601,6 +701,7 @@ Applied 2 migration(s).
 DATABASE_URL='<同じ接続文字列>' npm run db:migrate
 # -  0001_schema.sql (already applied)
 # -  0002_match_document_chunks.sql (already applied)
+# -  0003_demo_abuse_protection.sql (already applied)
 # Database is already up to date.
 ```
 
@@ -613,6 +714,7 @@ DATABASE_URL='<同じ接続文字列>' npm run db:migrate
 |---|---|
 | `DATABASE_URL` | Neon の **pooled** connection string |
 | `OPENAI_API_KEY` | OpenAI の API キー |
+| `DEMO_RATE_LIMIT_SECRET` | `openssl rand -hex 32` で生成した値（**リポジトリに残さない**） |
 | `OPENAI_CHAT_MODEL` | 任意（未設定なら `gpt-4o-mini`） |
 | `OPENAI_OCR_MODEL` | 任意（未設定なら `gpt-5-mini`） |
 | `RAG_TOP_K` / `RAG_SIMILARITY_THRESHOLD` / `RAG_CHUNK_SIZE` / `RAG_CHUNK_OVERLAP` | 任意 |
@@ -627,13 +729,15 @@ DATABASE_URL='<同じ接続文字列>' npm run db:migrate
 4. `/ask` で資料の内容について質問し、出典のページ番号が実際の PDF と一致する
 5. 資料に書かれていないことを質問すると「登録されている資料からは確認できませんでした。」が返る
 6. `/history` に質問と出典が残る
+7. サイドバーの「デモデータをリセット」で資料・履歴が消え、新しいセッションになる（**利用上限は戻らない**）
 
 ### 補足
 
 - **接続文字列は必ず pooled を使ってください。** 直結の接続文字列だと、暖まった Serverless Function が数個増えただけで無料枠の接続上限に達します。
 - **関数の実行時間**: `/api/documents/process` は `maxDuration = 300` を宣言しています。Hobby プランでは上限が短いため、大きな PDF がタイムアウトする場合があります（[既知の制限](#既知の制限)参照）。
 - 本番ビルドは `next build --webpack` に固定しています。PDF.jsが実行時に読むCMap・標準フォント資材と、`@napi-rs/canvas` のプラットフォーム別バイナリをVercelのServerless Functionへ確実にトレースするためです。
-- デモデータが増えてきたら `DATABASE_URL=... npm run db:cleanup -- --days=30` を実行します（Vercel Cron や GitHub Actions からの定期実行も可能です）。
+- デモデータが増えてきたら `DATABASE_URL=... npm run db:cleanup -- --days=30` を実行します（Vercel Cron や GitHub Actions からの定期実行も可能です）。アプリ自体も対象APIリクエストの約2%で期限切れカウンタと失効したステージング済みバイト列を掃除します。処理は Next.js の `after()` に登録され、Vercel ではレスポンス送信後も Function の実行時間内で完走するため、定期実行を設定しなくても DB は際限なく肥大化しません。
+- **`DEMO_RATE_LIMIT_SECRET` は Production / Preview / Development すべてに設定してください。** 未設定でも動作しますが、指紋の鍵がインスタンスごとのランダム値になるため、上限がインスタンスをまたいで共有されず、再起動でリセットされます。
 
 ---
 
@@ -670,7 +774,10 @@ RUN_OPENAI_INTEGRATION=1 node --env-file=.env.local node_modules/vitest/vitest.m
 | `citations.test.ts` | 出典の構築、同一ページの重複排除、類似度順、抜粋の切り詰め |
 | `document-validation.test.ts` | MIME/拡張子/サイズ、ページ数、表示タイトルの導出 |
 | `upload-plan.test.ts` | 分割サイズが Vercel のボディ上限未満であること、**分割が元ファイルを過不足なく覆うこと**、部分数が上限内であること |
-| `session.test.ts` | セッション ID の検証（SQL・パス・長さ違いの拒否）、Cookie が httpOnly であること |
+| `session.test.ts` | セッション ID の検証（SQL・パス・長さ違いの拒否）、Cookie 属性 |
+| `client-key.test.ts` | 転送ヘッダの信用判定、IPv4/IPv6(/64) の正規化、不正値の拒否、**生 IP が指紋に含まれないこと**、鍵を変えると指紋が変わること、Cookie が指紋に影響しないこと |
+| `demo-limits.test.ts` | OpenAI を消費する全操作に上限があること、固定ウィンドウの境界計算、`Retry-After` の範囲、利用者向けメッセージが内部情報を含まないこと |
+| `integration/abuse.integration.test.ts` | **実 DB**。migration 0003 の適用と冪等性、**同時実行で上限を超えないこと**、バケット・クライアントの独立性、**セッションリセットで上限が戻らないこと**、生 IP を保存しないこと、**上限到達時に OpenAI が呼ばれないこと**（OCR / Embedding、正常系の対照つき）、同時解析数の直列化、失効した `bytea` の削除 |
 | `question-validation.test.ts` | 文字数境界、空入力、スキーマ検証 |
 | `prompt.test.ts` | System Prompt の制約（コンテキスト限定・出典を書かせない） |
 | `rag-config.test.ts` | 環境変数のパースとクランプ、`EMBEDDING_DIMENSIONS` と `vector(1536)` の整合 |
@@ -691,13 +798,23 @@ RUN_OPENAI_INTEGRATION=1 node --env-file=.env.local node_modules/vitest/vitest.m
 
 公開デモとして運用するための制限です。運用形態を変える場合は `src/lib/config/rag.ts` の定数を変更します。
 
-| 項目 | 制限 |
-|---|---|
-| 資料 | 1セッションあたり 10件 |
-| 質問 | 1セッションあたり 30件 / 時 |
-| ファイル | PDF のみ / 10MB / 100ページ |
-| 質問文 | 2〜1000文字 |
-| セッション | 30日（Cookie 削除・リセットで消滅） |
+| 項目 | 制限 | 単位 |
+|---|---|---|
+| 資料 | 10件 | 1セッション（同時保有数） |
+| 質問 | 30件 / 時 | 1セッション |
+| 同時解析 | 2件 | 1セッション |
+| 質問 | 30件 / 時 | **クライアント指紋** |
+| 資料登録 | 15件 / 24時間 | **クライアント指紋** |
+| 解析実行（再試行を含む） | 25回 / 24時間 | **クライアント指紋** |
+| OCR | 150ページ / 24時間 | **クライアント指紋** |
+| Embedding | 5,000チャンク / 24時間 | **クライアント指紋** |
+| アップロード容量 | 40MB / 24時間 | **クライアント指紋** |
+| ファイル | PDF のみ / 10MB / 100ページ | 1資料 |
+| 質問文 | 2〜1000文字 | 1質問 |
+| セッション | 30日（Cookie 削除・リセットで消滅） | Cookie |
+| ステージング済み PDF バイト列 | 24時間（未完了の資料のみ） | 1資料 |
+
+**クライアント指紋**の行は Cookie に依存しません。Cookie を削除しても、セッションをリセットしても、新しい UUID が発行されても戻りません。1層目（セッション単位）が体験のための上限、2層目（指紋単位）がコストのための上限です。
 | データ保持 | `npm run db:cleanup` による手動 / 定期削除 |
 
 デモセッションは**認証ではありません**。同じブラウザからのアクセスは同じデータを参照します。共有端末に機密資料をアップロードしないでください。
@@ -714,7 +831,8 @@ RUN_OPENAI_INTEGRATION=1 node --env-file=.env.local node_modules/vitest/vitest.m
 - **ベクトル検索のフィルタ方式** — 所有セッションによる絞り込みを `documents` との JOIN で行っています。数万チャンク規模までは問題ありませんが、大規模化する場合は `document_chunks` に `session_id` を非正規化し、パーティションまたは複合インデックスで絞り込む設計が有効です。
 - **リランキングなし** — 類似度上位 K 件をそのまま使用します。Cross-Encoder による再ランキングは未実装です。
 - **回答のストリーミング未対応** — 回答は生成完了後に一括表示されます。
-- **レート制限はセッション単位** — Cookie を捨てれば新しい枠が得られます。厳密な制御には IP ベースの制限（Vercel Firewall 等）の併用が必要です。
+- **クライアント指紋は IP 由来** — Cookie 削除やセッションリセットでは回避できませんが、モバイル回線の切り替え・VPN・大規模な IP ローテーションを行えば別クライアントとして扱われます。逆に、大規模 NAT や共有回線の背後にいる複数の訪問者は同じ枠を共有します。これは認証を導入しない限り原理的に残るトレードオフで、より厳密な制御が必要なら Vercel Firewall / WAF や CAPTCHA の併用、あるいは認証の導入が必要です。
+- **OCR の課金判定はページ描画の後** — `ocr_page` の消費は OpenAI へ画像を送る直前に行われるため API 費用は必ず抑止されますが、そのページの PNG 描画（ローカル CPU）は先に済んでいます。ページ数上限（100）と `document_process` 上限で総量が抑えられているため、実害はサーバー CPU の一時的な消費に留まります。
 - **Native抽出不能なフォント構造** — 同梱CMapとToUnicodeを利用しても文字対応を復元できない独自エンコーディングは、ページ単位OCRへフォールバックします。
 
 ---

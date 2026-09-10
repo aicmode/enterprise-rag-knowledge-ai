@@ -54,7 +54,14 @@ export interface PdfExtractionResult {
 }
 
 export interface ExtractPdfOptions {
-  /** Override only for deterministic tests or another server-side provider. */
+  /**
+   * Per-page OCR implementation.
+   *
+   * Production always passes one: `processDocument` supplies a wrapper that
+   * charges the demo's OCR budget before each call, which is what keeps a
+   * scanned PDF from being an unmetered route to the vision model. Omitting it
+   * falls back to calling OpenAI directly, which is for tests and scripts only.
+   */
   ocrPage?: OcrPage;
 }
 
@@ -169,6 +176,15 @@ async function renderPageDataUrl(page: PDFPageProxy): Promise<`data:image/png;ba
   return `data:image/png;base64,${canvas.toBuffer('image/png').toString('base64')}`;
 }
 
+/**
+ * Fallback used only when the caller supplies no `ocrPage`.
+ *
+ * This path is **unmetered**: it calls the vision model directly. The
+ * application never reaches it -- `processDocument` always passes a wrapper
+ * that charges the demo's OCR budget first -- and any new production caller
+ * must do the same. It exists so `extractPdfPages` stays usable on its own in
+ * tests and one-off scripts.
+ */
 async function defaultOcrPage(input: Parameters<OcrPage>[0]): Promise<string> {
   // Keep OpenAI and its key completely off the native-only path.
   const { ocrPageImage } = await import('./ocr');
@@ -257,6 +273,13 @@ export async function extractPdfPages(
             warnings.push({ pageNumber, code: 'ocr_no_text' });
           }
         } catch (error) {
+          // A refused OCR budget is not a page-level failure to recover from:
+          // continuing would call the model again for every remaining page and
+          // be refused every time, and the visitor would be told the PDF was
+          // unreadable when in fact the demo limit was reached. Abort the run
+          // and let the 429 reach them intact.
+          if (error instanceof AppError && error.code === 'rate_limited') throw error;
+
           const appError =
             error instanceof AppError && (error.code === 'ocr_timeout' || error.code === 'ocr_failed')
               ? error

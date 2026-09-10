@@ -45,6 +45,34 @@ export const MAX_UPLOAD_PARTS = Math.ceil(MAX_FILE_SIZE_BYTES / UPLOAD_PART_SIZE
 export const MAX_DOCUMENTS_PER_SESSION = 10;
 export const MAX_QUESTIONS_PER_SESSION_PER_HOUR = 30;
 
+/**
+ * Documents one session may have in `processing` at the same time.
+ *
+ * Distinct from the daily `document_process` quota: that one bounds total
+ * spend, this one bounds *concurrency*, so a visitor cannot start ten
+ * hundred-page OCR runs at once and hold a serverless instance (and a slice of
+ * the OpenAI rate limit) open for each. Two is enough that uploading a second
+ * PDF while the first is still parsing feels normal.
+ *
+ * Enforced under a per-session advisory lock in `claimDocumentForProcessing`,
+ * because a plain count-then-update would let simultaneous claims all read the
+ * same count and all pass.
+ */
+export const MAX_CONCURRENT_PROCESSING_PER_SESSION = 2;
+
+/**
+ * How long staged PDF bytes are kept for a document that is not `ready`.
+ *
+ * `failed` documents keep their bytes so "retry" does not demand the same
+ * upload twice -- but on a public demo that is also a way to park `bytea` in a
+ * free-tier database indefinitely, since a document that never succeeds never
+ * reaches the step that drops them. Bytes therefore have an expiry rather than
+ * living as long as the row: a day is far longer than any real retry, and after
+ * it the document is still listed, still shows its failure reason, and can
+ * still be deleted -- retrying it simply asks for the file again.
+ */
+export const STAGED_UPLOAD_RETENTION_HOURS = 24;
+
 /** Question input bounds, mirrored by the `questions.question` CHECK constraint. */
 export const MIN_QUESTION_LENGTH = 2;
 export const MAX_QUESTION_LENGTH = 1000;

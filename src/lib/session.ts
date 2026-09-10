@@ -13,10 +13,28 @@
  *  - **Isolation anyway.** Two visitors do not see, cite or delete each other's
  *    PDFs and history, because every query is scoped by this id.
  *
- * The cookie is `httpOnly`, so page JavaScript cannot read it, and the id is a
- * v4 UUID, so it cannot be guessed. It is not an authentication credential and
- * nothing in the app treats it as one -- it partitions demo data, and that is
- * all it is claimed to do.
+ * What actually provides that isolation is the id itself: a v4 UUID carries 122
+ * bits of randomness, so one visitor cannot arrive at another's id, and every
+ * query is scoped by it.
+ *
+ * `httpOnly` and `SameSite=Lax` are set as well, but it is worth being precise
+ * about what they do, because it is easy to overstate. `httpOnly` stops page
+ * JavaScript -- including injected script -- from *reading* the value; it does
+ * not make the value unforgeable. Anyone can send whatever cookie they like
+ * from outside a browser, and every visitor is free to delete or replace their
+ * own. The isolation rests on unguessability and on session-scoped queries, not
+ * on the cookie flags.
+ *
+ * The flags are also why this id is not signed. A signature would prove the
+ * server issued the value, but anyone may request a fresh one, and no other
+ * visitor's id can be guessed, so signing would close no attack -- only add
+ * moving parts.
+ *
+ * It is not an authentication credential and nothing in the app treats it as
+ * one. In particular, nothing that costs money is metered against it: because a
+ * visitor controls this cookie, a quota counted per session resets whenever
+ * they want it to. Those live in `src/lib/security/` and are keyed on an
+ * anonymous client fingerprint instead.
  */
 
 export const DEMO_SESSION_COOKIE = 'rag_demo_session';

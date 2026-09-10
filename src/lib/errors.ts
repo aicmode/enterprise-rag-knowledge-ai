@@ -53,7 +53,7 @@ const USER_MESSAGES: Record<AppErrorCode, string> = {
   embedding_failed: '資料の解析に失敗しました。もう一度お試しください。',
   retrieval_failed: '資料の検索に失敗しました。もう一度お試しください。',
   answer_failed: '回答の生成に失敗しました。もう一度お試しください。',
-  rate_limited: 'このデモでは1時間あたりの質問数に上限があります。しばらく待ってからお試しください。',
+  rate_limited: '公開デモのため、一定時間あたりの利用回数に上限があります。しばらく待ってからお試しください。',
   quota_exceeded: 'このデモで登録できる資料数の上限に達しました。不要な資料を削除してからお試しください。',
   session_unavailable: 'デモセッションを開始できませんでした。ページを再読み込みしてください。',
   already_processing: 'この資料は現在処理中です。完了までお待ちください。',
@@ -87,14 +87,24 @@ export class AppError extends Error {
   /** Safe to show to the end user. */
   readonly userMessage: string;
   readonly status: number;
+  /**
+   * Seconds after which a refused request may be retried, for the `Retry-After`
+   * header on a 429. A duration is not sensitive -- it is derived from the
+   * limit's own window length, not from anything about the client.
+   */
+  readonly retryAfterSeconds?: number;
 
-  constructor(code: AppErrorCode, options?: { cause?: unknown; userMessage?: string; detail?: string }) {
+  constructor(
+    code: AppErrorCode,
+    options?: { cause?: unknown; userMessage?: string; detail?: string; retryAfterSeconds?: number },
+  ) {
     // `message` is the *internal* description and stays server-side.
     super(options?.detail ?? code, { cause: options?.cause });
     this.name = 'AppError';
     this.code = code;
     this.userMessage = options?.userMessage ?? USER_MESSAGES[code];
     this.status = STATUS_BY_CODE[code];
+    this.retryAfterSeconds = options?.retryAfterSeconds;
   }
 }
 
@@ -115,6 +125,9 @@ export interface ErrorResponseBody {
   error: { code: AppErrorCode; message: string };
 }
 
+/** Response headers derived from the error, if any. Never carries internals. */
+export type ErrorResponseHeaders = Record<string, string>;
+
 /**
  * Log the real cause server-side and return a body that contains only the
  * user-facing message. No stack traces, no driver messages, no SQL.
@@ -123,14 +136,20 @@ export function toErrorResponse(
   error: unknown,
   context: string,
   fallback: AppErrorCode = 'internal_error',
-): { status: number; body: ErrorResponseBody } {
+): { status: number; body: ErrorResponseBody; headers: ErrorResponseHeaders } {
   const appError = toAppError(error, fallback);
 
   // Server log only.
   console.error(`[${context}] ${appError.code}: ${appError.message}`, appError.cause ?? '');
 
+  const headers: ErrorResponseHeaders = {};
+  if (appError.status === 429 && appError.retryAfterSeconds !== undefined) {
+    headers['Retry-After'] = String(appError.retryAfterSeconds);
+  }
+
   return {
     status: appError.status,
     body: { error: { code: appError.code, message: appError.userMessage } },
+    headers,
   };
 }

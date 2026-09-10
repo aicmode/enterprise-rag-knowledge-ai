@@ -20,8 +20,8 @@ export function errorJson(
   context: string,
   fallback: AppErrorCode = 'internal_error',
 ): NextResponse {
-  const { status, body } = toErrorResponse(error, context, fallback);
-  return NextResponse.json(body, { status });
+  const { status, body, headers } = toErrorResponse(error, context, fallback);
+  return NextResponse.json(body, { status, headers });
 }
 
 /** Parse a JSON body, converting malformed input into a validation failure. */

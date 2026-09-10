@@ -1,8 +1,9 @@
 import 'server-only';
 
+import { MAX_CONCURRENT_PROCESSING_PER_SESSION } from '@/lib/config/rag';
 import { AppError } from '@/lib/errors';
 import type { DocumentRow, DocumentStatus } from '@/lib/types';
-import { query, queryOne } from './client';
+import { query, queryOne, transaction } from './client';
 
 /**
  * Document persistence.
@@ -78,24 +79,64 @@ export async function createDocument(input: CreateDocumentInput): Promise<Docume
 /**
  * Claim a document for processing.
  *
- * The conditional `status in ('uploaded', 'failed')` acts as an optimistic
- * lock: two concurrent process requests race on this UPDATE and exactly one
- * sees a row come back. The loser gets `already_processing` instead of starting
- * a second, duplicate embedding run.
+ * Two things have to hold at once here, and both of them are races.
+ *
+ *  1. **One run per document.** The conditional `status in ('uploaded',
+ *     'failed')` is an optimistic lock: exactly one of two concurrent claims
+ *     sees a row come back, and the loser gets `already_processing` rather than
+ *     starting a duplicate embedding run.
+ *
+ *  2. **A bounded number of runs per session.** This one a conditional UPDATE
+ *     cannot express safely on its own. Under READ COMMITTED, simultaneous
+ *     claims each evaluate their subquery against their own snapshot, so all of
+ *     them can count zero documents in flight and all of them can proceed --
+ *     the classic read-check-act hole, and an expensive one when each run means
+ *     a hundred OCR calls.
+ *
+ * So the claim runs inside a transaction that first takes a session-scoped
+ * advisory lock. Claims for the same session serialise on it and each one sees
+ * what the previous claim committed; claims for different sessions take
+ * different locks and do not wait on each other. The lock is `xact`-scoped, so
+ * it is released on commit or rollback with nothing to leak.
  */
 export async function claimDocumentForProcessing(
   sessionId: string,
   documentId: string,
 ): Promise<DocumentRow> {
-  const claimed = await queryOne<DocumentRow>(
-    `update documents
-        set status = 'processing', error_message = null
-      where id = $1
-        and session_id = $2
-        and status in ('uploaded', 'failed')
-      returning ${DOCUMENT_COLUMNS}`,
-    [documentId, sessionId],
-  );
+  const claimed = await transaction<DocumentRow | null>(async (client) => {
+    // `hashtext` maps the session UUID onto the int4 an advisory lock takes.
+    // A collision between two sessions would only make one wait briefly for the
+    // other, so a hash is sufficient here -- there is no correctness claim
+    // resting on its uniqueness.
+    await client.query('select pg_advisory_xact_lock(hashtext($1))', [sessionId]);
+
+    const inFlight = await client.query<{ count: string }>(
+      `select count(*)::text as count
+         from documents
+        where session_id = $1 and status = 'processing'`,
+      [sessionId],
+    );
+
+    if (Number(inFlight.rows[0]?.count ?? 0) >= MAX_CONCURRENT_PROCESSING_PER_SESSION) {
+      throw new AppError('already_processing', {
+        detail: `session already has ${inFlight.rows[0]?.count} documents processing`,
+        userMessage:
+          '同時に解析できる資料数の上限に達しています。解析中の資料が完了してからお試しください。',
+      });
+    }
+
+    const result = await client.query<DocumentRow>(
+      `update documents
+          set status = 'processing', error_message = null
+        where id = $1
+          and session_id = $2
+          and status in ('uploaded', 'failed')
+        returning ${DOCUMENT_COLUMNS}`,
+      [documentId, sessionId],
+    );
+
+    return result.rows[0] ?? null;
+  });
 
   if (claimed) return claimed;
 

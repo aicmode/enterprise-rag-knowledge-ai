@@ -9,10 +9,12 @@ import {
 import { deleteDocumentChunks, replaceDocumentChunks } from '@/lib/db/chunks';
 import { deleteStagedUpload, readStagedUpload } from '@/lib/db/uploads';
 import { AppError, toAppError } from '@/lib/errors';
+import { consumeDemoQuota } from '@/lib/security/rate-limit';
 import { validatePageCount } from '@/lib/validation/document';
 import { chunkPages } from './chunking';
 import { embedTexts } from './embedding';
 import { extractPdfPages } from './pdf';
+import type { OcrPage } from './ocr';
 
 /**
  * The ingestion pipeline.
@@ -23,6 +25,14 @@ import { extractPdfPages } from './pdf';
  * page remains usable; the document is marked `ready` with an explicit page
  * warning. Extraction-wide or downstream failures mark it `failed` and remove
  * all chunks. A document is never exposed with half-written embedding batches.
+ *
+ * Cost policy: this is the only place in the application that can start a large
+ * number of OpenAI requests from a single HTTP call, so it meters as it goes
+ * rather than only at the door. The route already charged one
+ * `document_process` unit to get here; below, each page sent to the vision
+ * model costs an `ocr_page` unit *before* the request is made, and the chunks of
+ * a document cost `embedding_chunk` units before the first batch is sent. A
+ * budget that runs out mid-document stops the run rather than finishing it.
  */
 
 export interface IngestResult {
@@ -39,14 +49,18 @@ export interface IngestResult {
  *
  * @param sessionId  the demo session resolved from the cookie, never from the body
  * @param documentId the document to (re-)process
+ * @param clientKey  anonymous client fingerprint the OpenAI budget is charged
+ *                   to. Required, not optional: an optional cost guard is one
+ *                   forgotten argument away from being no cost guard.
  */
 export async function processDocument(
   sessionId: string,
   documentId: string,
+  clientKey: string,
 ): Promise<IngestResult> {
-  // Ownership and the optimistic lock in one statement: a document belonging to
-  // another session simply does not match, and neither does one already being
-  // processed.
+  // Ownership, the per-document lock and the per-session concurrency cap, all
+  // in one serialised claim: a document belonging to another session simply does
+  // not match, and neither does one already being processed.
   await claimDocumentForProcessing(sessionId, documentId);
 
   try {
@@ -54,7 +68,16 @@ export async function processDocument(
     const bytes = await readStagedUpload(documentId);
 
     // --- 2. Page-wise text extraction --------------------------------------
-    const extraction = await extractPdfPages(bytes);
+    // OCR runs only for pages whose native text is unusable, and each of those
+    // pages is charged before its image ever reaches OpenAI. The import stays
+    // lazy so a PDF that needs no OCR never loads the OpenAI client at all.
+    const guardedOcrPage: OcrPage = async (input) => {
+      await consumeDemoQuota(clientKey, 'ocr_page');
+      const { ocrPageImage } = await import('./ocr');
+      return ocrPageImage(input);
+    };
+
+    const extraction = await extractPdfPages(bytes, { ocrPage: guardedOcrPage });
 
     const pageCheck = validatePageCount(extraction.pageCount);
     if (!pageCheck.ok) {
@@ -70,6 +93,9 @@ export async function processDocument(
     }
 
     // --- 4. Embeddings (batched, order-preserving) -------------------------
+    // Charged per chunk, in one atomic step, before the first batch leaves.
+    await consumeDemoQuota(clientKey, 'embedding_chunk', chunks.length);
+
     const embeddings = await embedTexts(chunks.map((chunk) => chunk.content));
 
     if (embeddings.length !== chunks.length) {

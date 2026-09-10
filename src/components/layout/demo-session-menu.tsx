@@ -30,7 +30,12 @@ export function DemoSessionMenu({ sessionLabel }: { sessionLabel: string | null 
     try {
       const response = await fetch('/api/session/reset', { method: 'POST' });
       if (!response.ok) {
-        setError('リセットに失敗しました。');
+        // The endpoint is rate limited, so "too many resets" is a distinct and
+        // actionable outcome; showing the generic failure would hide it.
+        const body = (await response.json().catch(() => null)) as
+          | { error?: { message?: string } }
+          | null;
+        setError(body?.error?.message ?? 'リセットに失敗しました。');
         return;
       }
       setIsConfirming(false);
@@ -77,6 +82,11 @@ export function DemoSessionMenu({ sessionLabel }: { sessionLabel: string | null 
         <div className="mt-3 rounded-lg border border-border-subtle bg-surface-muted/60 p-3">
           <p className="text-xs leading-relaxed text-ink-muted">
             このセッションで登録した資料と質問履歴をすべて削除し、新しいデモセッションを開始します。
+          </p>
+          {/* Reset clears the visitor's data, not the demo's budget. Saying so
+              here keeps the button from reading as a way around the limits. */}
+          <p className="mt-2 text-xs leading-relaxed text-ink-faint">
+            公開デモの利用回数の上限はリセットされません。
           </p>
 
           <div className="mt-3 flex gap-2">
