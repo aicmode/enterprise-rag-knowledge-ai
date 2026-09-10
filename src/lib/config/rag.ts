@@ -1,0 +1,175 @@
+/**
+ * Central RAG tuning parameters.
+ *
+ * Every knob that affects retrieval quality lives here rather than being
+ * sprinkled through the pipeline as magic numbers. `resolveRagConfig` is a pure
+ * function so the parsing/clamping rules are unit-testable without touching
+ * `process.env`.
+ */
+
+/**
+ * Dimension of `text-embedding-3-small`.
+ *
+ * This MUST stay in sync with `vector(1536)` in
+ * `db/migrations/0001_schema.sql`. Changing the embedding model to one with a
+ * different dimension is a migration, not a config change.
+ */
+export const EMBEDDING_DIMENSIONS = 1536;
+
+export const EMBEDDING_MODEL = 'text-embedding-3-small';
+
+/** Hard limits on ingestion, mirrored by the CHECK constraints on `documents`. */
+export const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
+export const MAX_PAGE_COUNT = 100;
+
+/**
+ * Size of one upload part.
+ *
+ * Vercel caps a serverless function request body at 4.5 MB, but the product
+ * accepts 10 MB PDFs, so the browser slices the file and sends it in parts.
+ * 3 MB leaves comfortable headroom under that cap while keeping a 10 MB upload
+ * to four requests.
+ */
+export const UPLOAD_PART_SIZE_BYTES = 3 * 1024 * 1024;
+
+/** Upper bound on part index, derived so the two limits cannot drift apart. */
+export const MAX_UPLOAD_PARTS = Math.ceil(MAX_FILE_SIZE_BYTES / UPLOAD_PART_SIZE_BYTES);
+
+/**
+ * Public-demo quotas, per anonymous session.
+ *
+ * This deployment is a portfolio demo with no sign-in, so every request is
+ * ultimately paid for by the owner's OpenAI account. These caps bound what a
+ * single visitor can spend without making the demo feel restricted.
+ */
+export const MAX_DOCUMENTS_PER_SESSION = 10;
+export const MAX_QUESTIONS_PER_SESSION_PER_HOUR = 30;
+
+/**
+ * Documents one session may have in `processing` at the same time.
+ *
+ * Distinct from the daily `document_process` quota: that one bounds total
+ * spend, this one bounds *concurrency*, so a visitor cannot start ten
+ * hundred-page OCR runs at once and hold a serverless instance (and a slice of
+ * the OpenAI rate limit) open for each. Two is enough that uploading a second
+ * PDF while the first is still parsing feels normal.
+ *
+ * Enforced under a per-session advisory lock in `claimDocumentForProcessing`,
+ * because a plain count-then-update would let simultaneous claims all read the
+ * same count and all pass.
+ */
+export const MAX_CONCURRENT_PROCESSING_PER_SESSION = 2;
+
+/**
+ * How long staged PDF bytes are kept for a document that is not `ready`.
+ *
+ * `failed` documents keep their bytes so "retry" does not demand the same
+ * upload twice -- but on a public demo that is also a way to park `bytea` in a
+ * free-tier database indefinitely, since a document that never succeeds never
+ * reaches the step that drops them. Bytes therefore have an expiry rather than
+ * living as long as the row: a day is far longer than any real retry, and after
+ * it the document is still listed, still shows its failure reason, and can
+ * still be deleted -- retrying it simply asks for the file again.
+ */
+export const STAGED_UPLOAD_RETENTION_HOURS = 24;
+
+/** Question input bounds, mirrored by the `questions.question` CHECK constraint. */
+export const MIN_QUESTION_LENGTH = 2;
+export const MAX_QUESTION_LENGTH = 1000;
+
+/**
+ * A page whose extracted text is shorter than this is treated as having no
+ * usable text layer. If *every* page falls below it the PDF is almost certainly
+ * a scan, which is an OCR job and therefore out of scope -- we fail loudly
+ * instead of storing a document that can never answer anything.
+ */
+export const MIN_PAGE_TEXT_LENGTH = 20;
+
+/** Maximum tolerated share of suspicious glyphs before native text needs OCR. */
+export const MAX_GARBLED_TEXT_RATIO = 0.2;
+
+/** Rendered-page bounds keep OCR images readable without unbounded memory/token use. */
+export const OCR_RENDER_SCALE = 2;
+export const OCR_MAX_IMAGE_DIMENSION = 2048;
+export const OCR_MAX_OUTPUT_TOKENS = 4000;
+export const OCR_TIMEOUT_MS = 60_000;
+
+/** How many embedding inputs to send to OpenAI per request. */
+export const EMBEDDING_BATCH_SIZE = 64;
+
+export interface RagConfig {
+  /** Target chunk size in characters. */
+  chunkSize: number;
+  /** Characters of overlap carried from one chunk into the next. */
+  chunkOverlap: number;
+  /** Number of chunks retrieved per question. */
+  topK: number;
+  /** Minimum cosine similarity for a chunk to be considered relevant. */
+  similarityThreshold: number;
+  /** Chat model used for answer generation. */
+  chatModel: string;
+  /** Vision-capable model used only for page-level OCR fallback. */
+  ocrModel: string;
+}
+
+export const RAG_DEFAULTS: RagConfig = {
+  chunkSize: 1000,
+  chunkOverlap: 150,
+  topK: 5,
+  similarityThreshold: 0.45,
+  chatModel: 'gpt-4o-mini',
+  ocrModel: 'gpt-5-mini',
+};
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function parseIntOr(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function parseFloatOr(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+export type RawRagEnv = {
+  RAG_CHUNK_SIZE?: string;
+  RAG_CHUNK_OVERLAP?: string;
+  RAG_TOP_K?: string;
+  RAG_SIMILARITY_THRESHOLD?: string;
+  OPENAI_CHAT_MODEL?: string;
+  OPENAI_OCR_MODEL?: string;
+};
+
+/**
+ * Build a valid config from raw environment strings.
+ *
+ * Invalid or missing values fall back to defaults rather than crashing the
+ * app: a typo in an optional tuning variable should not take production down.
+ * Values are clamped into ranges the pipeline can actually honour -- in
+ * particular the overlap is forced below the chunk size, since an overlap >=
+ * chunk size would make the chunker fail to advance.
+ */
+export function resolveRagConfig(env: RawRagEnv = {}): RagConfig {
+  const chunkSize = clamp(parseIntOr(env.RAG_CHUNK_SIZE, RAG_DEFAULTS.chunkSize), 200, 4000);
+  const requestedOverlap = parseIntOr(env.RAG_CHUNK_OVERLAP, RAG_DEFAULTS.chunkOverlap);
+  const chunkOverlap = clamp(requestedOverlap, 0, Math.floor(chunkSize / 2));
+
+  return {
+    chunkSize,
+    chunkOverlap,
+    topK: clamp(parseIntOr(env.RAG_TOP_K, RAG_DEFAULTS.topK), 1, 20),
+    similarityThreshold: clamp(
+      parseFloatOr(env.RAG_SIMILARITY_THRESHOLD, RAG_DEFAULTS.similarityThreshold),
+      0,
+      1,
+    ),
+    chatModel: env.OPENAI_CHAT_MODEL?.trim() || RAG_DEFAULTS.chatModel,
+    ocrModel: env.OPENAI_OCR_MODEL?.trim() || RAG_DEFAULTS.ocrModel,
+  };
+}

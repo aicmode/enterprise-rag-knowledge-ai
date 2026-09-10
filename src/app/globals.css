@@ -1,0 +1,120 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens.
+ *
+ * A restrained enterprise palette: a deep slate neutral ramp carrying the
+ * structure, one indigo accent reserved for primary actions and AI surfaces,
+ * and semantic colours used only for state. Everything is defined once here so
+ * components never hard-code a hex value.
+ */
+@theme {
+  --color-canvas: #f7f8fa;
+  --color-surface: #ffffff;
+  --color-surface-muted: #f2f4f7;
+  --color-border-subtle: #e4e7ec;
+  --color-border-strong: #d0d5dd;
+
+  --color-ink: #101828;
+  --color-ink-muted: #475467;
+  --color-ink-subtle: #667085;
+  --color-ink-faint: #98a2b3;
+
+  --color-brand-50: #eef2ff;
+  --color-brand-100: #e0e7ff;
+  --color-brand-200: #c7d2fe;
+  --color-brand-500: #4f5bd5;
+  --color-brand-600: #4338ca;
+  --color-brand-700: #3730a3;
+
+  --color-success-50: #ecfdf3;
+  --color-success-200: #abefc6;
+  --color-success-600: #067647;
+
+  --color-warning-50: #fffaeb;
+  --color-warning-200: #fedf89;
+  --color-warning-700: #b54708;
+
+  --color-danger-50: #fef3f2;
+  --color-danger-200: #fecdca;
+  --color-danger-600: #d92d20;
+  --color-danger-700: #b42318;
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Hiragino Kaku Gothic ProN",
+    "Hiragino Sans", Meiryo, "Noto Sans JP", sans-serif;
+
+  --radius-card: 0.75rem;
+}
+
+/* --------------------------------------------------------------------------
+ * Base
+ * ----------------------------------------------------------------------- */
+html {
+  /* Long Japanese file names and questions must never widen the viewport. */
+  overflow-x: hidden;
+}
+
+body {
+  background-color: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/*
+ * A single, consistent focus ring across every interactive element.
+ * Visible focus is a hard accessibility requirement, so it is defined globally
+ * rather than left to each component to remember.
+ */
+:where(a, button, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-brand-500);
+  outline-offset: 2px;
+  border-radius: 0.375rem;
+}
+
+/* Long unbroken strings (URLs, file names) wrap instead of overflowing. */
+.break-anywhere {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background-color: var(--color-surface-muted);
+}
+
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background-image: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0,
+    rgba(255, 255, 255, 0.65) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  animation: shimmer 1.6s infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after {
+    animation: none;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
