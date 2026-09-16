@@ -2,6 +2,7 @@ import 'server-only';
 
 import type { ChatCompletionCreateParamsNonStreaming } from 'openai/resources/chat/completions';
 
+import { assertLiveAiProviderAllowed } from '@/lib/config/ai-runtime';
 import { AppError } from '@/lib/errors';
 import type { MatchedChunk } from '@/lib/types';
 import { getOpenAIClient } from './openai';
@@ -90,6 +91,12 @@ export async function generateAnswer({
   if (matches.length === 0) {
     return { answer: NO_CONTEXT_ANSWER, model };
   }
+
+  // Second guard, immediately before the completion request is built. In demo
+  // mode `/api/ask` never reaches this function at all -- it is served from the
+  // sample corpus -- and if some future caller did reach it, it refuses rather
+  // than generating.
+  assertLiveAiProviderAllowed('chat_completions');
 
   const openai = getOpenAIClient();
 

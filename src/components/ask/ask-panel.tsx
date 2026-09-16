@@ -13,6 +13,7 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { Skeleton } from '@/components/ui/skeleton';
 import { MAX_QUESTION_LENGTH } from '@/lib/config/rag';
 import { cn } from '@/lib/cn';
+import { DEMO_EXAMPLE_QUESTIONS } from '@/lib/demo/questions';
 import { formatDuration } from '@/lib/format';
 import type { AskSuccessResponse } from '@/lib/types';
 import { validateQuestion } from '@/lib/validation/question';
@@ -36,8 +37,20 @@ const EXAMPLE_QUESTIONS = [
  * always knows whether the system is working, found nothing, or failed. "Found
  * nothing" is a legitimate success here, not an error, and is presented as
  * such.
+ *
+ * `demoMode` changes what is *offered*, never how the screen works: the sample
+ * questions are the ones the demo corpus can answer, they stay reachable after
+ * the first answer instead of disappearing with the idle state, and a single
+ * line says where the answers come from. The request, the response shape and
+ * every component below are identical in both modes.
  */
-export function AskPanel({ hasReadyDocuments }: { hasReadyDocuments: boolean }) {
+export function AskPanel({
+  hasReadyDocuments,
+  demoMode = false,
+}: {
+  hasReadyDocuments: boolean;
+  demoMode?: boolean;
+}) {
   const [question, setQuestion] = useState('');
   const [state, setState] = useState<AskState>({ status: 'idle' });
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -103,9 +116,20 @@ export function AskPanel({ hasReadyDocuments }: { hasReadyDocuments: boolean }) 
   }
 
   const remaining = MAX_QUESTION_LENGTH - question.length;
+  const exampleQuestions = demoMode ? DEMO_EXAMPLE_QUESTIONS : EXAMPLE_QUESTIONS;
+
+  // In the demo the examples are the way in, so they stay available after the
+  // first answer rather than being an empty-state affordance.
+  const showExamples = demoMode || state.status === 'idle';
 
   return (
     <div className="space-y-6">
+      {demoMode ? (
+        <Alert tone="info">
+          公開デモではサンプル資料を使用しています。外部AI APIへの通信は行いません。質問の例から、検索・根拠・回答・出典という一連の流れをご確認いただけます。
+        </Alert>
+      ) : null}
+
       {!hasReadyDocuments ? (
         <Alert tone="info">
           回答可能な資料がまだありません。
@@ -175,11 +199,11 @@ export function AskPanel({ hasReadyDocuments }: { hasReadyDocuments: boolean }) 
             ) : null}
           </form>
 
-          {state.status === 'idle' ? (
+          {showExamples ? (
             <div className="mt-5 border-t border-border-subtle pt-4">
               <p className="text-xs font-medium text-ink-subtle">質問の例</p>
               <div className="mt-2 flex flex-wrap gap-2">
-                {EXAMPLE_QUESTIONS.map((example) => (
+                {exampleQuestions.map((example) => (
                   <button
                     key={example}
                     type="button"
@@ -200,7 +224,9 @@ export function AskPanel({ hasReadyDocuments }: { hasReadyDocuments: boolean }) 
 
       {state.status === 'error' ? <Alert tone="error">{state.message}</Alert> : null}
 
-      {state.status === 'success' ? <AnswerResult result={state.result} /> : null}
+      {state.status === 'success' ? (
+        <AnswerResult result={state.result} demoMode={demoMode} />
+      ) : null}
 
       {state.status === 'idle' && hasReadyDocuments ? (
         <Card>
@@ -231,7 +257,13 @@ function AnswerSkeleton() {
   );
 }
 
-function AnswerResult({ result }: { result: AskSuccessResponse & { noDocuments?: boolean } }) {
+function AnswerResult({
+  result,
+  demoMode = false,
+}: {
+  result: AskSuccessResponse & { noDocuments?: boolean };
+  demoMode?: boolean;
+}) {
   // "No relevant context" is a successful, honest outcome -- not an error.
   if (result.noRelevantContext) {
     return (
@@ -242,7 +274,9 @@ function AnswerResult({ result }: { result: AskSuccessResponse & { noDocuments?:
           description={
             result.noDocuments
               ? '「資料」画面からPDFをアップロードすると、根拠付きの回答ができるようになります。'
-              : '登録済みの資料には該当する記述が見つかりませんでした。表現を変えるか、該当資料が登録済みかご確認ください。'
+              : demoMode
+                ? '公開デモはサンプル資料のみを検索対象にしています。「質問の例」から選ぶと、検索から回答・出典までの流れをご確認いただけます。'
+                : '登録済みの資料には該当する記述が見つかりませんでした。表現を変えるか、該当資料が登録済みかご確認ください。'
           }
           action={
             result.noDocuments ? (

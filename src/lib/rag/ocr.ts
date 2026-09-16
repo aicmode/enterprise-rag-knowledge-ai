@@ -3,6 +3,7 @@ import 'server-only';
 import OpenAI from 'openai';
 import type { ResponseCreateParamsNonStreaming } from 'openai/resources/responses/responses';
 
+import { assertLiveAiProviderAllowed } from '@/lib/config/ai-runtime';
 import { getRagConfig } from '@/lib/config/env';
 import { OCR_MAX_OUTPUT_TOKENS, OCR_TIMEOUT_MS } from '@/lib/config/rag';
 import { AppError } from '@/lib/errors';
@@ -54,6 +55,10 @@ export function buildOcrRequest(
 
 /** Transcribe one rendered PDF page with a vision-capable model. */
 export async function ocrPageImage(input: OcrPageInput): Promise<string> {
+  // Second guard, before a page image is ever addressed to the vision model --
+  // the most expensive request the product can make.
+  assertLiveAiProviderAllowed('ocr_vision');
+
   const openai = getOpenAIClient();
   const model = getRagConfig().ocrModel;
 

@@ -1,11 +1,13 @@
 import { NextResponse } from 'next/server';
 
 import { errorJson, okJson, readJson } from '@/lib/api';
+import { isDemoAiRuntime } from '@/lib/config/ai-runtime';
 import { getRagConfig } from '@/lib/config/env';
 import { MAX_QUESTIONS_PER_SESSION_PER_HOUR } from '@/lib/config/rag';
 import { retrieveRelevantChunks } from '@/lib/db/chunks';
 import { countReadyDocuments } from '@/lib/db/documents';
 import { countRecentQuestions, saveQuestion } from '@/lib/db/questions';
+import { answerDemoQuestion } from '@/lib/demo/rag';
 import { AppError } from '@/lib/errors';
 import { generateAnswer } from '@/lib/rag/answer';
 import { buildCitations } from '@/lib/rag/citations';
@@ -37,6 +39,14 @@ export const maxDuration = 60;
  * either request is built. The quota is keyed on the client fingerprint rather
  * than on the session, because a session id is a cookie the caller can throw
  * away; see `src/lib/security/rate-limit.ts`.
+ *
+ * ...and in `AI_RUNTIME_MODE=demo` it spends nothing, because neither request
+ * is made. The demo branch below answers the same question, with the same
+ * shape of response, from the fixed sample corpus in `src/lib/demo/`. The two
+ * branches are separated *before* the first billable step rather than at it:
+ * there is no condition under which the demo branch can fall through to the
+ * live one, and none under which a failure in the demo branch retries against
+ * OpenAI.
  */
 export async function POST(request: Request): Promise<NextResponse> {
   const startedAt = Date.now();
@@ -54,6 +64,54 @@ export async function POST(request: Request): Promise<NextResponse> {
 
     const question = parsed.data.question;
     const config = getRagConfig();
+
+    // --- Public demo -------------------------------------------------------
+    // No embedding, no completion, no provider of any kind. The quota is still
+    // consumed: it no longer guards an API bill, but it still guards the rows
+    // this endpoint writes to a free-tier database, and keeping one enforcement
+    // path for both modes means the limits cannot rot while the demo is live.
+    if (isDemoAiRuntime()) {
+      const clientKey = resolveClientKey(request);
+      await consumeDemoQuota(clientKey, 'ask');
+      maybeSweepDemoRetention();
+
+      const demo = answerDemoQuestion(question, {
+        topK: config.topK,
+        similarityThreshold: config.similarityThreshold,
+      });
+
+      const responseTimeMs = Date.now() - startedAt;
+
+      // History is a real feature of the product, so a demo answer is recorded
+      // like any other. Best-effort, exactly as below: an unavailable database
+      // must not cost the visitor their answer.
+      let demoQuestionId = '';
+      try {
+        demoQuestionId = await saveQuestion({
+          sessionId,
+          question,
+          answer: demo.answer,
+          citations: demo.citations,
+          responseTimeMs,
+          model: demo.model,
+        });
+      } catch (saveError) {
+        console.error('[ask] failed to persist demo question history', saveError);
+      }
+
+      const demoPayload: AskSuccessResponse & { noDocuments: boolean } = {
+        questionId: demoQuestionId,
+        question,
+        answer: demo.answer,
+        citations: demo.citations,
+        model: demo.model,
+        responseTimeMs,
+        noRelevantContext: demo.noRelevantContext,
+        noDocuments: false,
+      };
+
+      return okJson(demoPayload);
+    }
 
     // Distinguish "you have no documents" from "nothing matched" so the UI can
     // point the visitor at the right next action.

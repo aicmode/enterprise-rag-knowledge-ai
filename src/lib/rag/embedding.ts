@@ -1,5 +1,6 @@
 import 'server-only';
 
+import { assertLiveAiProviderAllowed } from '@/lib/config/ai-runtime';
 import { EMBEDDING_BATCH_SIZE, EMBEDDING_DIMENSIONS, EMBEDDING_MODEL } from '@/lib/config/rag';
 import { AppError } from '@/lib/errors';
 import { getOpenAIClient } from './openai';
@@ -49,6 +50,12 @@ function assertDimensions(vector: readonly number[], index: number): void {
  */
 export async function embedTexts(texts: readonly string[]): Promise<number[][]> {
   if (texts.length === 0) return [];
+
+  // Second guard, at the call site rather than in the client factory. Both are
+  // load-bearing: this one states the rule where the billable request is
+  // assembled, so it survives a refactor that swaps the shared client for a
+  // locally constructed one.
+  assertLiveAiProviderAllowed('embeddings');
 
   const openai = getOpenAIClient();
   const embeddings: number[][] = [];
