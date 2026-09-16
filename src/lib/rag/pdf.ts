@@ -321,7 +321,19 @@ export async function extractPdfPages(
           // be refused every time, and the visitor would be told the PDF was
           // unreadable when in fact the demo limit was reached. Abort the run
           // and let the 429 reach them intact.
-          if (error instanceof AppError && error.code === 'rate_limited') throw error;
+          //
+          // The same reasoning covers a refusal from the runtime-mode guard: if
+          // this deployment may not call the vision model at all, every
+          // remaining page would be refused for the identical reason, and the
+          // honest report is the configuration, not "unreadable PDF".
+          if (
+            error instanceof AppError &&
+            (error.code === 'rate_limited' ||
+              error.code === 'ai_demo_mode' ||
+              error.code === 'ai_not_configured')
+          ) {
+            throw error;
+          }
 
           const appError =
             error instanceof AppError && (error.code === 'ocr_timeout' || error.code === 'ocr_failed')

@@ -20,7 +20,9 @@
 ```
 
 > **公開デモについて**
-> 本番デプロイは**ポートフォリオ公開デモ**として構成されています。ログイン・新規登録はありません。公開 URL を開くとそのままデモ環境に入り、PDF を登録して質問できます。訪問者ごとのデータは、匿名の**デモセッション Cookie** で分離されます（[セキュリティ](#セキュリティ)参照）。
+> 本番デプロイは**ポートフォリオ公開デモ**として構成されています。ログイン・新規登録はありません。公開 URL を開くとそのままデモ環境に入り、サンプル資料に対して質問できます。訪問者ごとのデータは、匿名の**デモセッション Cookie** で分離されます（[セキュリティ](#セキュリティ)参照）。
+>
+> 公開デモは `AI_RUNTIME_MODE=demo` で動作し、**外部 AI API（OpenAI 等）を一切呼び出しません**。質問→検索→回答→出典という RAG の流れは、固定のサンプル資料と決定論的なローカル検索で再現しています。実際の OpenAI Embeddings / 回答生成 / OCR を使う実装はリポジトリにそのまま残っており、開発者がローカルで `AI_RUNTIME_MODE=live` を指定したときだけ有効になります。詳細は [AI 実行モード](#ai-実行モードdemo--live)を参照してください。
 
 ---
 
@@ -28,6 +30,7 @@
 
 - [このプロジェクトの見どころ](#このプロジェクトの見どころ)
 - [主な機能](#主な機能)
+- [AI 実行モード（demo / live）](#ai-実行モードdemo--live)
 - [技術スタック](#技術スタック)
 - [アーキテクチャ](#アーキテクチャ)
 - [PDF 取り込みフロー](#pdf-取り込みフロー)
@@ -53,6 +56,7 @@ RAG は「それらしい回答」を作るだけなら簡単ですが、**業�
 
 | 論点 | 本実装の方針 |
 |---|---|
+| **公開デモの安全性** | 公開デプロイは `AI_RUNTIME_MODE=demo` で動作し、**外部 AI API を1回も呼ばない**。プロバイダ層にもガードを置き、API キーが存在しても demo では使用しない。実 AI 実装はそのまま残し、ローカルの `live` 指定でのみ有効化 |
 | **Citation の生成主体** | LLM に出典を書かせず、**アプリ側が検索結果から構築**。存在しないページ番号が生成されることが原理的にない |
 | **ページ番号の保持** | PDF を一括文字列化せず、**ページ単位で抽出 → ページを跨がないチャンク分割**。1チャンク＝1ページなので出典が一意に決まる |
 | **回答範囲の限定** | System Prompt でコンテキスト限定を明示し、根拠がなければ「登録されている資料からは確認できませんでした。」を返す |
@@ -68,6 +72,7 @@ RAG は「それらしい回答」を作るだけなら簡単ですが、**業�
 
 ### 公開デモセッション
 - 登録・ログイン不要。公開 URL を開いた時点で利用可能
+- 公開デモ（`AI_RUNTIME_MODE=demo`）では**外部 AI API を呼び出さず**、サンプル資料で RAG の流れを確認できる
 - 匿名セッション Cookie（v4 UUID）で訪問者ごとに資料と履歴を分離
 - 「デモデータをリセット」で自分の資料・履歴を削除し、新しいセッションを開始
 - 利用回数・OpenAI コストの上限は Cookie ではなく匿名クライアント指紋で管理（リセットしても上限は戻りません）
@@ -78,6 +83,7 @@ RAG は「それらしい回答」を作るだけなら簡単ですが、**業�
 - 資料が無い場合の Empty State と導線
 
 ### 資料管理 `/documents`
+- 公開デモではサンプル資料3件を解析済みの状態で表示（アップロードは無効。以下は `live` モードの機能）
 - ドラッグ＆ドロップ / ファイル選択
 - PDF 形式・10MB・100ページの検証
 - 日本語・英語・混在テキストPDFとスキャンPDFの自動判定
@@ -87,6 +93,7 @@ RAG は「それらしい回答」を作るだけなら簡単ですが、**業�
 - 削除（チャンク・ステージング済みバイト列・メタデータを CASCADE で整合削除）
 
 ### AI に質問 `/ask`
+- 公開デモでは固定のサンプル質問・回答・出典を決定論的に返す（同じ質問には常に同じ結果）
 - Idle / Loading / Success / No result / Error の明示的な状態管理
 - 二重送信防止・文字数制限・空入力拒否
 - **出典カード**（資料名・ページ番号・引用文・一致度）
@@ -96,6 +103,68 @@ RAG は「それらしい回答」を作るだけなら簡単ですが、**業�
 - 質問・回答・出典・評価・応答時間・モデル名の記録
 - 詳細画面で回答全文と出典を再確認
 - 自分のデモセッションの履歴のみ表示
+
+---
+
+## AI 実行モード（demo / live）
+
+公開デモは**第三者の操作によって開発者の OpenAI 利用料金が発生しない**ことを最優先に構成しています。そのための切り替えが `AI_RUNTIME_MODE` です。
+
+| 値 | 外部 AI API | 回答の作り方 | PDF アップロード | 用途 |
+|---|---|---|---|---|
+| `demo`（**既定**） | **呼び出さない** | 固定のサンプル資料 + 決定論的なローカル検索 | 無効（サンプル資料を表示） | Vercel の公開デモ |
+| `live` | OpenAI Embeddings / Chat / Vision OCR | 実際の RAG パイプライン | 有効 | 開発者のローカル環境 |
+
+### 設計の3原則
+
+1. **既定は `demo`。** 未設定・空文字・綴り違い（`prod`、`true`、`LIVE!` など）はすべて `demo` になります。**`live` へフォールバックする経路はありません。**
+2. **API キーはスイッチではない。** `OPENAI_API_KEY` が設定されていても、`demo` の間は読み取られず、使用されません。「キーがあるから live」という判定は行いません。キーは資格情報であって、許可ではないからです。
+3. **`live` は明示的かつ完全な指定のみ。** `AI_RUNTIME_MODE=live` **かつ** `OPENAI_API_KEY` がある場合だけ実 API を呼び出します。キーが無い `live` は、値を出力しない明確な設定エラー（`ai_not_configured`）になります。
+
+### 二重の安全装置
+
+Route Handler だけで守ると、将来追加された経路が守られません。そこで**プロバイダ層そのもの**にガードを置いています。
+
+```
+Route Handler          demo なら質問はサンプル資料で処理し、
+（/api/ask ほか）       アップロード系は demo_upload_disabled を返す
+      │
+      ▼
+getOpenAIClient()      demo では OpenAI クライアントを生成しない（ai_demo_mode）
+      │                └ メモ化済みインスタンスを返す前にガードする
+      ▼
+embedTexts / generateAnswer / ocrPageImage
+                       課金リクエストを組み立てる直前で再度ガード
+```
+
+`demo` では OpenAI クライアントが**存在し得ない**ため、将来新しい Route から誤って provider を呼んでも、課金 API には到達しません。ガードの書き忘れの結果が「請求」ではなく「拒否」になる構造です。
+
+### demo モードの体験
+
+`/ask` は次の流れをそのまま確認できます。
+
+```
+質問 → 検索（決定論的なローカル検索）→ 関連チャンク → 回答 → 出典（資料名・ページ番号・引用文・一致度）
+```
+
+- サンプル資料は `src/lib/demo/corpus.ts` に定義した**架空の社内文書3件**（就業規則 / 経費精算ガイドライン / 情報セキュリティ運用ハンドブック）です。
+- 代表質問（`/ask` の「質問の例」）には、それぞれ**固定の回答と出典**を用意しています。同じ質問には常に同じ回答・同じ出典・同じ一致度が返ります。
+- 用意のない質問でも、検索自体は実行されます。関連する箇所が見つかれば**出典として提示**し、見つからなければ「公開デモではサンプル質問を使って RAG の動作をご確認いただけます。」と案内します。**いずれの場合も OpenAI へはフォールバックしません。**
+- Citation は本番と同じ `buildCitations()` が検索結果から構築します。デモ用の別実装ではありません。
+
+> **注意（誠実な記載）** — demo の検索は Embedding ではなく、文字 bigram と語彙ヒントによる決定論的なスコアリングです（`src/lib/demo/retrieval.ts`）。意味的な近さ（「リモートワーク」と「在宅勤務」）を捉えるのは本来 Embedding の役割であり、demo ではチャンクごとの語彙（`keywords`）で明示的に補っています。ベクトル検索そのものの実装は `live` モードと統合テストで確認できます。
+
+### live モード（開発者向け）
+
+```bash
+# .env.local
+AI_RUNTIME_MODE=live
+OPENAI_API_KEY=sk-...
+```
+
+これで PDF アップロード、Native テキスト抽出、必要ページの OCR、Embedding 生成、pgvector 検索、LLM による回答生成という**本来のパイプライン全体**が有効になります。実装は一切削除していません。
+
+**Vercel の Production では `AI_RUNTIME_MODE=demo` を設定してください。** 未設定でも既定で `demo` になりますが、意図を明示するため設定を推奨します。
 
 ---
 
@@ -200,7 +269,14 @@ src/
 ├── lib/
 │   ├── config/
 │   │   ├── rag.ts           RAG パラメータ・上限値の集約（純粋関数）
+│   │   ├── ai-runtime.ts    demo / live の判定とプロバイダ層ガード（server-only）
 │   │   └── env.ts           サーバー環境変数（server-only + Zod）
+│   ├── demo/                公開デモ（AI_RUNTIME_MODE=demo）専用。外部通信なし
+│   │   ├── corpus.ts        架空のサンプル資料とチャンク（固定データ）
+│   │   ├── questions.ts     サンプル質問（UI と共有する唯一のデモ資産）
+│   │   ├── answers.ts       代表質問の固定回答と根拠チャンク
+│   │   ├── retrieval.ts     決定論的なローカル検索（純粋関数）
+│   │   └── rag.ts           質問→検索→回答→Citation（本番と同じ citations.ts を使用）
 │   ├── db/
 │   │   ├── client.ts        接続プール・型パーサ・トランザクション
 │   │   ├── documents.ts     資料の CRUD と処理クレーム
@@ -238,7 +314,7 @@ sequenceDiagram
     participant B as Browser
     participant A as API Route
     participant P as Pipeline
-    participant O as OpenAI
+    participant O as OpenAI（live モードのみ）
     participant D as PostgreSQL
 
     B->>B: ファイル検証（PDF / 10MB）
@@ -290,11 +366,18 @@ PDF 全体を 1 本の文字列に連結してから分割する実装では、�
 sequenceDiagram
     participant U as User
     participant A as /api/ask
-    participant O as OpenAI
+    participant O as OpenAI（live モードのみ）
     participant D as PostgreSQL
 
     U->>A: 質問（2〜1000文字）
     A->>A: デモセッション解決 + Zod 検証
+    A->>A: AI_RUNTIME_MODE を判定
+    alt AI_RUNTIME_MODE=demo（公開デモ）
+        A->>D: ask クォータを消費（DB 書き込みの保護）
+        A->>A: サンプル資料をローカル検索 → 固定回答 → Citation 構築
+        A->>D: questions に保存
+        A-->>U: 回答 + 出典カード（OpenAI は一切呼ばれない）
+    end
     A->>D: 直近1時間の質問数（デモのレート制限）
     A->>D: ready な資料が1件でもあるか確認
     alt 資料が0件
@@ -449,10 +532,13 @@ match_document_chunks(
 | 変数 | 公開範囲 | 用途 |
 |---|---|---|
 | `DATABASE_URL` | **サーバーのみ** | PostgreSQL 接続 |
-| `OPENAI_API_KEY` | **サーバーのみ** | OCR / Embedding / 回答生成 |
+| `OPENAI_API_KEY` | **サーバーのみ** | OCR / Embedding / 回答生成（**`live` モードでのみ読み取られる**） |
+| `AI_RUNTIME_MODE` | **サーバーのみ**（秘密ではない） | 外部 AI API を呼び出してよいかの判定 |
 | `DEMO_RATE_LIMIT_SECRET` | **サーバーのみ** | 匿名クライアント指紋の HMAC 鍵 |
 
-**このアプリに `NEXT_PUBLIC_*` は 1 つもありません。** ブラウザはデータベースにも OpenAI にも直接アクセスせず、必ず自前の Route Handler を経由します。秘密値を含む `src/lib/config/env.ts` と `src/lib/db/*` は先頭で `import 'server-only'` しているため、Client Component から誤って import すると**ビルドが失敗します**。
+**このアプリに `NEXT_PUBLIC_*` は 1 つもありません。** ブラウザはデータベースにも OpenAI にも直接アクセスせず、必ず自前の Route Handler を経由します。秘密値を含む `src/lib/config/env.ts` と `src/lib/db/*`、および実行モードを判定する `src/lib/config/ai-runtime.ts` は先頭で `import 'server-only'` しているため、Client Component から誤って import すると**ビルドが失敗します**。実行モードは Server Component が解決し、UI へは真偽値の prop としてのみ渡ります。
+
+公開デモにおける**AI 費用に対する第一防御は、レート制限ではなく「外部 AI API を呼ばないこと」**です（[AI 実行モード](#ai-実行モードdemo--live)）。以下の濫用対策は、`live` モードで運用する場合のコスト上限であり、`demo` モードでは DB 書き込みの保護として機能し続けます。レート制限があることは、課金 API を公開してよい理由にはなりません。
 
 ### デモセッションによる分離
 
@@ -581,6 +667,9 @@ returning used
 | 同時解析数の上限 | 解析中の資料の完了待ちを案内（409） | 変更しない |
 | ステージング期限切れの再試行 | アップロードが完了していません。 | `failed`（再アップロードで復帰） |
 | セッション未確立 | デモセッションを開始できませんでした。 | — |
+| demo モードでのアップロード / 解析要求 | 公開デモではサンプル資料を使用している旨を案内（503 / `demo_upload_disabled`） | 作成・変更しない |
+| demo モードからの AI プロバイダ呼び出し | 外部 AI を呼び出さない公開デモである旨を案内（503 / `ai_demo_mode`） | 変更しない |
+| `live` なのに `OPENAI_API_KEY` が無い | AI 機能が未設定である旨のみを案内（500 / `ai_not_configured`。**変数名も値もレスポンスに出さない**） | 変更しない |
 
 `failed` の資料は一覧に理由とともに表示され、**再試行**ボタンから再解析できます。再試行時は既存チャンクを削除してから処理するため、チャンクが重複しません。ステージング済みのバイト列は **24時間**保持されるため、その間はファイルの再アップロードなしで再試行できます。期限を過ぎるとバイト列だけが削除され（資料行と失敗理由は残ります）、再試行は「アップロードが完了していません」を返すので、同じファイルを選び直せば復帰できます。公開デモでは、失敗し続ける資料の `bytea` が無制限に溜まる方が問題だからです。
 
@@ -609,6 +698,9 @@ docker run -d --name rag-pg \
 # 3. 環境変数
 cp .env.example .env.local
 #   DATABASE_URL=postgres://ragdev:ragdev@127.0.0.1:55433/ragdev
+#   AI_RUNTIME_MODE=demo   ← 既定。サンプル資料でUIとRAGの流れを確認する
+#   （実際のOpenAI連携を試す場合のみ）
+#   AI_RUNTIME_MODE=live
 #   OPENAI_API_KEY=sk-...
 #   （.env.local は Git 管理外）
 
@@ -642,7 +734,8 @@ npm run dev
 | 変数名 | 必須 | 説明 |
 |---|---|---|
 | `DATABASE_URL` | ✅ | **秘密**。PostgreSQL 接続文字列。Vercel では Neon の**プール済み**（`-pooler`）を使用 |
-| `OPENAI_API_KEY` | ✅ | **秘密**。サーバー専用 |
+| `AI_RUNTIME_MODE` | 任意（既定 `demo`） | `demo` = 外部 AI API を呼ばない公開デモ / `live` = 実 AI モード。**未設定・不正値はすべて `demo`**。Vercel Production では `demo` を設定 |
+| `OPENAI_API_KEY` | `live` で必須 | **秘密**。サーバー専用。`demo` では**設定されていても使用されません** |
 | `DEMO_RATE_LIMIT_SECRET` | ✅（本番） | **秘密**。匿名クライアント指紋の HMAC 鍵。`openssl rand -hex 32` で生成。未設定でも起動はするが、インスタンスごとのランダム値になり再起動で上限が失われる |
 | `DEMO_TRUST_PROXY_HEADERS` | 任意 | `x-forwarded-for` 等を信用するか。未設定なら `VERCEL=1` のときだけ信用する。自前のリバースプロキシ配下でのみ `1` を設定 |
 | `OPENAI_CHAT_MODEL` | 任意 | 既定 `gpt-4o-mini` |
@@ -652,7 +745,9 @@ npm run dev
 | `RAG_CHUNK_SIZE` | 任意 | 既定 `1000`（200〜4000 にクランプ） |
 | `RAG_CHUNK_OVERLAP` | 任意 | 既定 `150`（チャンクサイズの 1/2 まで） |
 
-> `DEMO_RATE_LIMIT_SECRET` の実値はリポジトリにもこの README にも記載しません。`.env.local` と Vercel の Environment Variables にのみ設定します。
+> `DEMO_RATE_LIMIT_SECRET` と `OPENAI_API_KEY` の実値は、リポジトリにもこの README にも記載しません。`.env.local`（Git 管理外）と Vercel の Environment Variables にのみ設定します。
+
+> `AI_RUNTIME_MODE` は秘密ではありませんが、**安全側に倒れる唯一のスイッチ**です。`live` にできるのは開発者だけであり、公開 URL の挙動を変えるには Vercel の環境変数を明示的に変更したうえで再デプロイする必要があります。
 
 > `DEMO_TRUST_PROXY_HEADERS` を安易に `1` にしないでください。上流が上書きしないヘッダを信用すると、リクエストごとに別のヘッダを送るだけで全ての上限を回避できます（**上限が無いより悪い**状態になります）。
 
@@ -664,7 +759,7 @@ npm run dev
 
 ## 本番デプロイ（Vercel + Neon）
 
-Supabase / Vercel Blob などの追加サービスは不要です。必要なのは **Neon（無料枠）** と **Vercel** と **OpenAI API キー**だけです。
+Supabase / Vercel Blob などの追加サービスは不要です。必要なのは **Neon（無料枠）** と **Vercel** だけです。公開デモは `AI_RUNTIME_MODE=demo` で動くため、**OpenAI API キーは公開デプロイの必須要件ではありません**（設定しても demo モードでは使用されません）。
 
 ### 1. Neon プロジェクトの作成
 
@@ -712,24 +807,35 @@ DATABASE_URL='<同じ接続文字列>' npm run db:migrate
 
 | Key | Value |
 |---|---|
+| `AI_RUNTIME_MODE` | **`demo`**（公開デモでは必ずこの値。未設定でも既定で `demo` ですが、意図を明示するため設定を推奨） |
 | `DATABASE_URL` | Neon の **pooled** connection string |
-| `OPENAI_API_KEY` | OpenAI の API キー |
 | `DEMO_RATE_LIMIT_SECRET` | `openssl rand -hex 32` で生成した値（**リポジトリに残さない**） |
-| `OPENAI_CHAT_MODEL` | 任意（未設定なら `gpt-4o-mini`） |
-| `OPENAI_OCR_MODEL` | 任意（未設定なら `gpt-5-mini`） |
+| `OPENAI_API_KEY` | **公開デモでは不要**。設定しても `demo` モードでは使用されません |
+| `OPENAI_CHAT_MODEL` / `OPENAI_OCR_MODEL` | 任意（`live` モードでのみ意味を持ちます） |
 | `RAG_TOP_K` / `RAG_SIMILARITY_THRESHOLD` / `RAG_CHUNK_SIZE` / `RAG_CHUNK_OVERLAP` | 任意 |
 
 3. **Deploy**（環境変数を後から追加・変更した場合は再デプロイが必要です）
 
+> **Production で `AI_RUNTIME_MODE=live` にしないでください。** 公開 URL を第三者が操作するたびに、OpenAI の利用料金が発生します。上限（レート制限）は請求を有界にしますが、ゼロにはしません。
+
 ### 4. 動作確認
 
+`AI_RUNTIME_MODE=demo`（公開デモ）:
+
 1. 公開 URL を開く → ログインを求められずダッシュボードが表示される
-2. `/documents` でテキストPDFまたはスキャンPDFをアップロード
-3. ステータスが `解析中` → `利用可能` に変わる
-4. `/ask` で資料の内容について質問し、出典のページ番号が実際の PDF と一致する
-5. 資料に書かれていないことを質問すると「登録されている資料からは確認できませんでした。」が返る
-6. `/history` に質問と出典が残る
-7. サイドバーの「デモデータをリセット」で資料・履歴が消え、新しいセッションになる（**利用上限は戻らない**）
+2. `/documents` にサンプル資料3件が `利用可能` で並び、アップロード欄の代わりにデモの説明が表示される
+3. `/ask` の「質問の例」から質問すると、回答と出典（資料名・ページ番号・引用文・一致度）が表示される
+4. サンプル資料と無関係な質問をすると「公開デモではサンプル質問を使って RAG の動作をご確認いただけます。」が返る
+5. `/history` に質問と出典が残り、モデル欄に `demo-mode / local-retrieval` と表示される
+6. サイドバーの「デモデータをリセット」で履歴が消え、新しいセッションになる（**利用上限は戻らない**）
+7. DevTools の Network に `api.openai.com` への通信が**1件も現れない**
+
+`AI_RUNTIME_MODE=live`（開発者のローカル環境）:
+
+1. `/documents` でテキストPDFまたはスキャンPDFをアップロード
+2. ステータスが `解析中` → `利用可能` に変わる
+3. `/ask` で資料の内容について質問し、出典のページ番号が実際の PDF と一致する
+4. 資料に書かれていないことを質問すると「登録されている資料からは確認できませんでした。」が返る
 
 ### 補足
 
@@ -747,9 +853,9 @@ DATABASE_URL='<同じ接続文字列>' npm run db:migrate
 npm run test
 ```
 
-`180 tests / 16 files`（2026-09-09 時点。外部連携2ファイルは既定でskip）。ロジックを純粋関数に分離しているため、外部サービスなしで中核を検証できます。
+`257 tests / 23 files`（2026-09-16 時点。外部連携3ファイルは既定でskip）。ロジックを純粋関数に分離しているため、外部サービスなしで中核を検証できます。
 
-これに加えて、実際の PostgreSQL に接続する統合テスト（35件）と、実OpenAI APIで日本語OCR・回答・cross-language embeddingを確認するテスト（2件）があります。既定ではスキップされ、明示的に接続情報や実行フラグを渡したときだけ実行されます。
+これに加えて、実際の PostgreSQL に接続する統合テスト（60件）と、実OpenAI APIで日本語OCR・回答・cross-language embeddingを確認するテスト（2件）があります。既定ではスキップされ、明示的に接続情報や実行フラグを渡したときだけ実行されます。
 
 ```bash
 docker run -d --name rag-pg \
@@ -757,7 +863,7 @@ docker run -d --name rag-pg \
   -p 127.0.0.1:55433:5432 pgvector/pgvector:pg17
 
 export DATABASE_INTEGRATION_URL=postgres://ragdev:ragdev@127.0.0.1:55433/ragdev
-npm run test                        # 215 tests pass / OpenAI 2 tests skip
+npm run test                        # 317 tests pass / OpenAI 2 tests skip
 ```
 
 統合テストは**マイグレーションの実行そのものから**始まり、決定的なローカル Embedding 関数を使うため、`OPENAI_API_KEY` なしで pgvector 検索・出典ページ番号・セッション分離まで検証できます（LLM の生成文だけが対象外）。使い捨ての DB を指定してください（マイグレーションを適用し、行を書き込みます）。
@@ -785,6 +891,9 @@ RUN_OPENAI_INTEGRATION=1 node --env-file=.env.local node_modules/vitest/vitest.m
 | `errors.test.ts` | **内部エラー詳細がレスポンスに漏れないこと**、HTTP ステータス対応 |
 | `citation-card.test.tsx` | 出典カードの描画（資料名・P.n・引用文・一致度） |
 | `server-env.test.ts` | DB 設定と OpenAI 設定が独立に検証されること、エラーが変数名のみを出し値を漏らさないこと |
+| `ai-runtime.test.ts` | **未設定・空・綴り違いがすべて `demo` になること**、`live` は明示指定のみ、**API キーの存在が live を意味しないこと**、キー無し `live` が設定エラーになること、エラーに値が出ないこと |
+| `demo-provider-guard.test.ts` | **demo モードで OpenAI SDK の呼び出し回数が 0 であること**（コンストラクタ / embeddings / chat / responses を spy）。キーがあっても 0、不正な mode でも 0、質問フロー全体でも 0。対照として live + キーでは実際に呼ばれること |
+| `demo-rag.test.ts` | デモコーパスの整合（実在する資料・ページ）、代表質問→固定回答、**決定論**、想定外質問で案内に落ちること（OpenAI へ行かないこと）、固定回答に資料名・ページ番号を書かないこと |
 | `integration/postgres.integration.test.ts` | **実 DB 接続**。マイグレーションの適用と冪等性、`vector(1536)`、分割アップロードのバイト単位復元、`match_document_chunks`、**セッション分離**、Feedback UPSERT、再処理の冪等性、同時処理クレーム、削除の整合性 |
 | `pdf-text.test.ts` | テキスト結合（日本語に不要な空白を入れない）、正規化 |
 | `pdf-extraction.test.ts` | 日本語ToUnicode Native抽出、scan OCR、native/scan/native mixed PDF、ページ番号、破損・保護PDF、OCR失敗・timeout・部分成功 |
@@ -800,6 +909,8 @@ RUN_OPENAI_INTEGRATION=1 node --env-file=.env.local node_modules/vitest/vitest.m
 
 | 項目 | 制限 | 単位 |
 |---|---|---|
+| **外部 AI API 呼び出し** | **0 回**（`AI_RUNTIME_MODE=demo`） | デプロイ全体 |
+| **PDF アップロード / 解析** | **無効**（`demo`。サンプル資料を表示） | デプロイ全体 |
 | 資料 | 10件 | 1セッション（同時保有数） |
 | 質問 | 30件 / 時 | 1セッション |
 | 同時解析 | 2件 | 1セッション |
@@ -814,6 +925,8 @@ RUN_OPENAI_INTEGRATION=1 node --env-file=.env.local node_modules/vitest/vitest.m
 | セッション | 30日（Cookie 削除・リセットで消滅） | Cookie |
 | ステージング済み PDF バイト列 | 24時間（未完了の資料のみ） | 1資料 |
 
+上の2行は `demo` モードの挙動です。以下の数値は `live` モードで運用した場合のコスト上限であり、`demo` モードでは DB 書き込みの保護として引き続き有効です。
+
 **クライアント指紋**の行は Cookie に依存しません。Cookie を削除しても、セッションをリセットしても、新しい UUID が発行されても戻りません。1層目（セッション単位）が体験のための上限、2層目（指紋単位）がコストのための上限です。
 | データ保持 | `npm run db:cleanup` による手動 / 定期削除 |
 
@@ -823,6 +936,8 @@ RUN_OPENAI_INTEGRATION=1 node --env-file=.env.local node_modules/vitest/vitest.m
 
 ## 既知の制限
 
+- **公開デモの検索は Embedding ではない** — `AI_RUNTIME_MODE=demo` では、外部 AI を呼ばないという要件を満たすため、検索を決定論的なローカルスコアリングに置き換えています。意味的な類似（「リモートワーク」↔「在宅勤務」）はチャンクごとの語彙ヒントで補っており、pgvector による実際のベクトル検索は `live` モードと DB 統合テストで確認できます。
+- **公開デモでは任意 PDF を試せない** — アップロードと解析は課金 API（OCR / Embedding）を伴うため、公開デモでは無効化し、解析済みのサンプル資料を表示しています。取り込みパイプラインの実装は削除しておらず、`live` モードでそのまま動作します。
 - **OCR精度は原稿品質に依存** — 低解像度、手書き、極端な傾き、複雑な表では文字を取得できない場合があります。一部ページだけ失敗した場合はページ番号付き警告を残し、取得できたページは検索対象にします。
 - **PDF のみ対応** — Word・Excel・PowerPoint・HTML は未対応です。
 - **原本 PDF を保存しない** — 取り込み完了後に原本は破棄されるため、「出典をクリックして元のページを表示する」機能は現状の設計では実装できません。実装する場合はオブジェクトストレージの追加が前提になります。

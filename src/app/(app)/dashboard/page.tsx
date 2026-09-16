@@ -11,6 +11,7 @@ import Link from 'next/link';
 
 import { PageHeader } from '@/components/layout/page-header';
 import { Alert } from '@/components/ui/alert';
+import { isDemoAiRuntime } from '@/lib/config/ai-runtime';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
@@ -25,6 +26,7 @@ import {
   getFeedbackTotals,
   listRecentQuestions,
 } from '@/lib/db/questions';
+import { listDemoDocuments } from '@/lib/demo/corpus';
 import { formatDateTime, formatPercent, truncate } from '@/lib/format';
 import { getSessionId } from '@/lib/session-server';
 
@@ -37,6 +39,12 @@ export const dynamic = 'force-dynamic';
  * A Server Component throughout -- it is read-only, so none of it needs to ship
  * JavaScript. The counts are `count(*)` aggregates, so Postgres never transfers
  * the rows themselves.
+ *
+ * In the public demo the document figures come from the fixed sample corpus
+ * rather than from `documents`, because that is what the 資料 screen lists and
+ * what questions are answered from. The question figures stay live in both
+ * modes: a demo answer is recorded in history exactly like any other, so those
+ * counts describe something real either way.
  */
 export default async function DashboardPage() {
   const sessionId = await getSessionId();
@@ -55,23 +63,24 @@ export default async function DashboardPage() {
     );
   }
 
+  const demoMode = isDemoAiRuntime();
+  const demoDocuments = demoMode ? listDemoDocuments() : [];
+
   // Independent reads, issued concurrently. Every one of them is scoped to this
   // visitor's demo session.
-  const [
-    totalDocuments,
-    readyDocuments,
-    totalQuestions,
-    feedbackTotals,
-    documents,
-    questions,
-  ] = await Promise.all([
-    countDocuments(sessionId),
-    countReadyDocuments(sessionId),
+  const [totalQuestions, feedbackTotals, questions] = await Promise.all([
     countQuestions(sessionId),
     getFeedbackTotals(sessionId),
-    listRecentDocuments(sessionId, 5),
     listRecentQuestions(sessionId, 5),
   ]);
+
+  const [totalDocuments, readyDocuments, documents] = demoMode
+    ? [demoDocuments.length, demoDocuments.length, demoDocuments.slice(0, 5)]
+    : await Promise.all([
+        countDocuments(sessionId),
+        countReadyDocuments(sessionId),
+        listRecentDocuments(sessionId, 5),
+      ]);
 
   const feedbackCount = feedbackTotals.total;
   const helpfulRate = feedbackCount > 0 ? feedbackTotals.helpful / feedbackCount : null;
@@ -126,10 +135,14 @@ export default async function DashboardPage() {
         />
         <ActionCard
           href="/documents"
-          icon={UploadCloud}
-          title="PDFをアップロード"
-          description="社内マニュアルや規程を登録して、検索対象を増やします。"
-          cta="資料を登録する"
+          icon={demoMode ? FileText : UploadCloud}
+          title={demoMode ? 'サンプル資料を見る' : 'PDFをアップロード'}
+          description={
+            demoMode
+              ? '回答の根拠になっている資料と、その解析状況を確認します。'
+              : '社内マニュアルや規程を登録して、検索対象を増やします。'
+          }
+          cta={demoMode ? '資料を確認する' : '資料を登録する'}
         />
       </div>
 

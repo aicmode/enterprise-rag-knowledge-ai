@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 
 import { errorJson, okJson, readJson } from '@/lib/api';
+import { isDemoAiRuntime } from '@/lib/config/ai-runtime';
 import { MAX_DOCUMENTS_PER_SESSION } from '@/lib/config/rag';
 import { countDocuments, createDocument } from '@/lib/db/documents';
 import { AppError } from '@/lib/errors';
@@ -23,6 +24,12 @@ export const runtime = 'nodejs';
  * The row is always written with the session id resolved from the demo-session
  * cookie; nothing about ownership is taken from the request body.
  *
+ * In `AI_RUNTIME_MODE=demo` the endpoint accepts nothing at all. Registration
+ * is the first step of a pipeline whose later steps are billable -- OCR for a
+ * scanned page, an embedding for every chunk -- and the cheapest way to
+ * guarantee the public demo never reaches them is to not start. The 資料 screen
+ * shows the fixed sample corpus instead, and says so.
+ *
  * Two limits apply, and they answer different questions. The per-session count
  * bounds how much one visitor can have registered *at once* -- but it counts
  * live rows, so deleting a document frees a slot, and a fresh cookie starts
@@ -32,6 +39,12 @@ export const runtime = 'nodejs';
  */
 export async function POST(request: Request): Promise<NextResponse> {
   try {
+    if (isDemoAiRuntime()) {
+      throw new AppError('demo_upload_disabled', {
+        detail: 'document registration is disabled while AI_RUNTIME_MODE=demo',
+      });
+    }
+
     const sessionId = await requireSessionId();
 
     const parsed = registerDocumentSchema.safeParse(await readJson(request));

@@ -36,6 +36,9 @@ export type AppErrorCode =
   | 'quota_exceeded'
   | 'session_unavailable'
   | 'already_processing'
+  | 'ai_demo_mode'
+  | 'ai_not_configured'
+  | 'demo_upload_disabled'
   | 'internal_error';
 
 const USER_MESSAGES: Record<AppErrorCode, string> = {
@@ -57,6 +60,12 @@ const USER_MESSAGES: Record<AppErrorCode, string> = {
   quota_exceeded: 'このデモで登録できる資料数の上限に達しました。不要な資料を削除してからお試しください。',
   session_unavailable: 'デモセッションを開始できませんでした。ページを再読み込みしてください。',
   already_processing: 'この資料は現在処理中です。完了までお待ちください。',
+  ai_demo_mode:
+    '公開デモモードで動作しているため、外部AIへのリクエストは実行されません。サンプル資料でRAGの動作をご確認いただけます。',
+  ai_not_configured:
+    'AI機能の設定が完了していないため実行できませんでした。管理者にお問い合わせください。',
+  demo_upload_disabled:
+    '公開デモではサンプル資料を使用しています。PDFのアップロードはローカル環境（liveモード）でご利用いただけます。',
   internal_error: '予期しないエラーが発生しました。もう一度お試しください。',
 };
 
@@ -79,6 +88,9 @@ const STATUS_BY_CODE: Record<AppErrorCode, number> = {
   quota_exceeded: 429,
   session_unavailable: 400,
   already_processing: 409,
+  ai_demo_mode: 503,
+  ai_not_configured: 500,
+  demo_upload_disabled: 503,
   internal_error: 500,
 };
 

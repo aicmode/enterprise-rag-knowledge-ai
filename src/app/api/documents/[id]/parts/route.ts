@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 
 import { errorJson, okJson } from '@/lib/api';
+import { isDemoAiRuntime } from '@/lib/config/ai-runtime';
 import { MAX_FILE_SIZE_BYTES, UPLOAD_PART_SIZE_BYTES } from '@/lib/config/rag';
 import { getDocument } from '@/lib/db/documents';
 import { getStagedByteLength, saveUploadPart } from '@/lib/db/uploads';
@@ -42,6 +43,16 @@ export async function POST(
   context: { params: Promise<{ id: string }> },
 ): Promise<NextResponse> {
   try {
+    // Demo mode has no document to attach a part to -- registration is refused
+    // before this endpoint can be addressed -- but it is guarded here as well,
+    // so that no combination of requests can stage bytes for a pipeline the
+    // deployment is not allowed to run.
+    if (isDemoAiRuntime()) {
+      throw new AppError('demo_upload_disabled', {
+        detail: 'upload parts are disabled while AI_RUNTIME_MODE=demo',
+      });
+    }
+
     const sessionId = await requireSessionId();
     const { id } = await context.params;
 

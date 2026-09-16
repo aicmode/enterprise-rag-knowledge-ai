@@ -5,6 +5,7 @@ import {
   FileText,
   Loader2,
   RefreshCw,
+  ShieldCheck,
   Trash2,
   UploadCloud,
 } from 'lucide-react';
@@ -39,8 +40,20 @@ type UploadPhase = 'idle' | 'registering' | 'uploading' | 'processing';
  * Each stage is reported separately, because "uploading" and "analysing" have
  * very different durations and a single spinner for both makes a 100-page PDF
  * look hung.
+ *
+ * `demoMode` replaces the drop zone with a short explanation and hides the
+ * per-row destructive action, because in the public demo the listed documents
+ * are a shared sample corpus rather than this visitor's own files. Everything
+ * else on the screen -- the card, the list, the status badges, the metadata --
+ * is the same component rendering the same `DocumentRow` shape.
  */
-export function DocumentManager({ initialDocuments }: { initialDocuments: DocumentRow[] }) {
+export function DocumentManager({
+  initialDocuments,
+  demoMode = false,
+}: {
+  initialDocuments: DocumentRow[];
+  demoMode?: boolean;
+}) {
   const router = useRouter();
 
   // The list is rendered straight from the server prop rather than copied into
@@ -231,9 +244,32 @@ export function DocumentManager({ initialDocuments }: { initialDocuments: Docume
       {/* ---------------- Upload ---------------- */}
       <Card>
         <CardHeader>
-          <CardTitle>PDFをアップロード</CardTitle>
+          <CardTitle>{demoMode ? 'サンプル資料について' : 'PDFをアップロード'}</CardTitle>
         </CardHeader>
         <CardBody>
+          {demoMode ? (
+            <div className="rounded-xl border border-border-subtle bg-surface-muted/50 px-5 py-6">
+              <div className="flex gap-3">
+                <ShieldCheck className="mt-0.5 size-5 shrink-0 text-brand-600" aria-hidden="true" />
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-ink">
+                    公開デモではサンプル資料を使用しています
+                  </p>
+                  <p className="mt-1.5 text-sm leading-relaxed text-ink-subtle">
+                    下記の資料はテキスト抽出・チャンク分割・ベクトル化まで完了した状態で登録されています。
+                    「AIに質問」から、検索・根拠・回答・出典の流れをそのままお試しいただけます。
+                  </p>
+                  <p className="mt-2 text-xs leading-relaxed text-ink-faint">
+                    PDFのアップロードと解析（テキスト抽出・OCR・Embedding生成）は、ローカル環境で
+                    <code className="mx-1 rounded bg-surface px-1 py-0.5 text-[11px]">
+                      AI_RUNTIME_MODE=live
+                    </code>
+                    を設定した場合に実行されます。実装はリポジトリにそのまま残っています。
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : (
           <div
             onDragEnter={onDragEnter}
             onDragOver={(event) => event.preventDefault()}
@@ -313,6 +349,7 @@ export function DocumentManager({ initialDocuments }: { initialDocuments: Docume
               }}
             />
           </div>
+          )}
 
           {error ? (
             <Alert tone="error" className="mt-4">
@@ -340,10 +377,12 @@ export function DocumentManager({ initialDocuments }: { initialDocuments: Docume
             title="まだ資料が登録されていません"
             description="社内マニュアルや規程のPDFをアップロードすると、テキスト解析と必要ページのOCRが行われ、根拠付きで検索できるようになります。"
             action={
-              <Button type="button" onClick={() => fileInputRef.current?.click()}>
-                <UploadCloud className="size-4" aria-hidden="true" />
-                最初のPDFをアップロード
-              </Button>
+              demoMode ? null : (
+                <Button type="button" onClick={() => fileInputRef.current?.click()}>
+                  <UploadCloud className="size-4" aria-hidden="true" />
+                  最初のPDFをアップロード
+                </Button>
+              )
             }
           />
         ) : (
@@ -404,15 +443,20 @@ export function DocumentManager({ initialDocuments }: { initialDocuments: Docume
                       </Button>
                     ) : null}
 
-                    <button
-                      type="button"
-                      aria-label={`${document.title} を削除`}
-                      disabled={busyId === document.id || document.status === 'processing'}
-                      onClick={() => setPendingDelete(document)}
-                      className="flex size-8 items-center justify-center rounded-lg text-ink-faint transition-colors hover:bg-danger-50 hover:text-danger-600 disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      <Trash2 className="size-4" aria-hidden="true" />
-                    </button>
+                    {/* The demo corpus is shared and fixed, so it offers no
+                        destructive action -- there is nothing here that belongs
+                        to this visitor to delete. */}
+                    {demoMode ? null : (
+                      <button
+                        type="button"
+                        aria-label={`${document.title} を削除`}
+                        disabled={busyId === document.id || document.status === 'processing'}
+                        onClick={() => setPendingDelete(document)}
+                        className="flex size-8 items-center justify-center rounded-lg text-ink-faint transition-colors hover:bg-danger-50 hover:text-danger-600 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <Trash2 className="size-4" aria-hidden="true" />
+                      </button>
+                    )}
                   </div>
                 </div>
               </li>
